@@ -324,6 +324,10 @@ def _cache_worker(task):
 
 
 def preprocess(raw_dir="data/raw", cache_dir="data/cache", workers=4, **options):
+    defaults = {"max_actors": 32, "max_polylines": 128, "map_radius": 100}
+    options = {**defaults, **options}
+    radius = float(options["map_radius"])
+    options["map_radius"] = int(radius) if radius.is_integer() else radius
     raw_dir, cache_dir = Path(raw_dir), Path(cache_dir)
     manifest = read_json(raw_dir / "manifest.json")
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -333,9 +337,11 @@ def preprocess(raw_dir="data/raw", cache_dir="data/cache", workers=4, **options)
     existing.write_bytes((raw_dir / "manifest.json").read_bytes())
     config_path = cache_dir / "preprocessing.json"
     signature = {"version": 1, **options}
-    if config_path.exists() and read_json(config_path) != signature:
-        raise ValueError("Preprocessing options changed. Use a new cache directory.")
-    write_json(config_path, signature)
+    if config_path.exists():
+        if {**defaults, **read_json(config_path)} != signature:
+            raise ValueError("Preprocessing options changed. Use a new cache directory.")
+    else:
+        write_json(config_path, signature)
     if workers < 1:
         raise ValueError("Preprocessing workers must be positive")
     count, catalog, audit, tasks = 0, [], {}, []

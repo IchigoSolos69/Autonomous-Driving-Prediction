@@ -167,7 +167,20 @@ class CheckpointTests(unittest.TestCase):
             manifest.write_text(json.dumps({"splits": {"train": ["a"], "validation": ["b"]}}), encoding="utf-8")
             output = Path(directory) / "run"
             config = {"model": {}, "training": {"batch_size": 2, "accumulation_steps": 2}}
-            first = train(config, cache, output, epochs=1, device="cpu")
+            first = train({**config, "data": {"max_actors": 32}}, cache, output, epochs=1, device="cpu")
+            foreign_output = Path(directory)/"other-run"
+            foreign_output.mkdir()
+            for checkpoint_name in ("best.pt", "last.pt"):
+                foreign_checkpoint = foreign_output/checkpoint_name
+                foreign_checkpoint.write_bytes(b"unrelated checkpoint")
+                with self.assertRaisesRegex(ValueError, "already contains checkpoints"):
+                    train(config, cache, foreign_output, epochs=2, device="cpu", resume=first["checkpoint"])
+                self.assertEqual(foreign_checkpoint.read_bytes(), b"unrelated checkpoint")
+                self.assertEqual(list(foreign_output.iterdir()), [foreign_checkpoint])
+                foreign_checkpoint.unlink()
+            for changed in ({"seed": 43}, {"model": {"graph": False}}, {"training": {"batch_size": 1}}):
+                with self.assertRaisesRegex(ValueError, "configuration differs"):
+                    train({**config, **changed}, cache, output, epochs=2, device="cpu", resume=first["checkpoint"])
             second = train(config, cache, output, epochs=2, device="cpu", resume=first["checkpoint"])
             saved = load_checkpoint(second["checkpoint"])
             self.assertEqual(saved["completed_epochs"], 2)

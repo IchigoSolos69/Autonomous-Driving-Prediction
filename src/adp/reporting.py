@@ -15,7 +15,8 @@ def write_report(directory, report, records):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     figure, axes = plt.subplots(1, 3, figsize=(15, 4), constrained_layout=True)
-    for name in ("raw", "calibrated"):
+    risk_calibration = report.get("risk", {}).get("calibration", {})
+    for name in (("raw", "calibrated") if risk_calibration.get("fitted") else ("raw",)):
         bins = report.get("risk", {}).get(name, {}).get("reliability", {}).get("bins", [])
         usable = [b for b in bins if b.get("count", 0)]
         if usable:
@@ -29,9 +30,14 @@ def write_report(directory, report, records):
         axes[0].set_title("Risk reliability: insufficient positive events")
         if not report.get("risk", {}).get("eligible_count", 0):
             axes[0].text(.5, .3, "No eligible event labels\nCalibration not established", ha="center", transform=axes[0].transAxes)
+    elif report.get("risk", {}).get("status") in ("uncalibrated", "not_fitted"):
+        axes[0].set_title("Risk reliability: calibration not established")
     axes[1].hist([v for r in records for v in r.get("minFDE", [])], bins=20, color="#176b87")
     axes[1].set(xlabel="Final displacement error (m)", ylabel="Scored actor count", title="Best-of-six forecast error")
-    for label, key in (("raw", "mode_reliability_raw"), ("adjusted", "mode_reliability")):
+    mode_series = [("raw", "mode_reliability_raw")]
+    if risk_calibration.get("applied"):
+        mode_series.append(("adjusted", "mode_reliability"))
+    for label, key in mode_series:
         bins = [b for b in report.get(key, {}).get("bins", []) if b["count"]]
         if bins:
             axes[2].plot([b["mean_probability"] for b in bins], [b["event_frequency"] for b in bins], marker="o", label=label)

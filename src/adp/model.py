@@ -50,6 +50,9 @@ class ForecastModel(nn.Module):
         super().__init__()
         self.config = dict(config or {})
         c = self.config
+        self.shared_world_ce_weight = float(c.get("shared_world_ce_weight", 0))
+        if not math.isfinite(self.shared_world_ce_weight) or self.shared_world_ce_weight < 0:
+            raise ValueError("shared_world_ce_weight must be finite and nonnegative")
         width, heads = c.get("width", 128), c.get("heads", 4)
         self.modes = c.get("modes", 6)
         self.history_embedding = nn.Linear(8, width)
@@ -115,10 +118,12 @@ class ForecastModel(nn.Module):
                                  ((3-clearance).sigmoid()*probabilities[..., None]).sum(1)], dim=-1)
         risk_logits = self.risk(torch.cat([nodes, summaries], dim=-1)).squeeze(-1)
         return {"means": means, "scales": scales, "logits": logits, "risk_logits": risk_logits,
-                "map_enabled": self.config.get("use_map", True)}
+                "map_enabled": self.config.get("use_map", True),
+                "shared_world_ce_weight": self.shared_world_ce_weight}
 
 
 def forecast_loss(outputs, batch):
+    from adp.calibration import mode_targets
     from adp.metrics import risk_labels
     means, scales = outputs["means"].float(), outputs["scales"].float()
     raw_target = batch["future"].float()
@@ -144,8 +149,12 @@ def forecast_loss(outputs, batch):
         known = mask[:, None] & (means.abs() <= 127.5).all(-1)
         penalties = F.relu(-sdf)*known
         offroad = (penalties.sum((1, 2, 3))/known.sum((1, 2, 3)).clamp_min(1)).mean()
-    loss = nll+.1*trajectory+.2*risk+.01*offroad
+    world_targets, world_eligible = mode_targets({"means": means.detach()}, batch)
+    world_ce = (F.cross_entropy(outputs["logits"][world_eligible].float(), world_targets[world_eligible])
+                if world_eligible.any() else outputs["logits"].float().sum()*0)
+    loss = nll+.1*trajectory+.2*risk+.01*offroad+outputs.get("shared_world_ce_weight", 0)*world_ce
     return {"loss": loss, "nll": nll, "trajectory": trajectory, "risk": risk, "offroad": offroad,
+            "shared_world_ce": world_ce, "world_supervision_count": world_eligible.sum(),
             "risk_supervision_count": eligible.sum()}
 
 

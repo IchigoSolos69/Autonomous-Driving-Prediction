@@ -183,9 +183,44 @@ def _atomic_json(path: Path, value: dict) -> None:
 
 def load_checkpoint(path: str | Path, map_location: str = "cpu") -> dict:
     checkpoint = torch.load(Path(path), map_location=map_location, weights_only=True)
-    if checkpoint.get("format_version") != 1:
-        raise ValueError("Unsupported checkpoint format; expected format_version=1.")
+    if checkpoint.get("format_version") not in (1, 2):
+        raise ValueError("Unsupported checkpoint format; expected format_version 1 or 2.")
     return checkpoint
+
+
+def _objective_values(parts: dict) -> dict:
+    values = {key: value for key, value in parts.items() if not key.endswith("_count")}
+    return {key: float(value.detach()) if isinstance(value, torch.Tensor) else float(value)
+            for key, value in values.items()}
+
+
+def _validation_displacement(outputs: dict, batch: dict) -> dict:
+    totals = {"joint_sum": 0.0, "joint_count": 0, "focal_sum": 0.0, "focal_count": 0}
+    if "means" not in outputs:
+        return totals
+    future = batch["future"].float()
+    dynamic = batch["dynamic_mask"].bool() & batch["actor_mask"].bool()
+    complete = (batch["future_mask"].bool() & torch.isfinite(future).all(-1)).all(-1)
+    scored = batch.get("scored_mask", dynamic).bool() & dynamic & complete
+    distances = torch.linalg.vector_norm(outputs["means"].float()[..., -1, :]-future[:, None, :, -1], dim=-1)
+    joint = torch.where(scored[:, None], distances, 0).sum(-1)/scored.sum(-1).clamp_min(1)[:, None]
+    eligible = scored.any(-1)
+    focal_eligible = complete[:, 0] & dynamic[:, 0]
+    totals.update(joint_sum=float(joint.amin(-1)[eligible].sum()), joint_count=int(eligible.sum()),
+                  focal_sum=float(distances[:, :, 0].amin(-1)[focal_eligible].sum()),
+                  focal_count=int(focal_eligible.sum()))
+    return totals
+
+
+def _selection_key(selection: str, validation_loss: float, joint_minfde: float | None,
+                   focal_minfde: float | None, epoch: int) -> tuple:
+    if selection == "validation_loss":
+        return validation_loss, epoch
+    if selection != "joint_minFDE":
+        raise ValueError("training.checkpoint_selection must be validation_loss or joint_minFDE")
+    if joint_minfde is None or focal_minfde is None:
+        raise ValueError("joint_minFDE checkpoint selection requires complete scored dynamic validation actors and focal futures")
+    return joint_minfde, focal_minfde, epoch
 
 
 def train(
@@ -202,7 +237,9 @@ def train(
         raise ValueError("Epochs and overfit_batches must be positive.")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if resume is None and any((output_dir / name).exists() for name in ("last.pt", "best.pt")):
+    if any((output_dir / name).exists() for name in ("last.pt", "best.pt")) and (
+        resume is None or Path(resume).resolve().parent != output_dir.resolve()
+    ):
         raise ValueError("Output directory already contains checkpoints. Resume that run or choose another output directory.")
     config = json.loads(json.dumps(config))
     settings = config.get("training", {})
@@ -256,7 +293,9 @@ def train(
             raise ValueError("Resume refused: the dataset manifest differs from the checkpoint.")
         if "preprocessing_hash" in saved and saved["preprocessing_hash"] != prep_hash:
             raise ValueError("Resume refused: preprocessing differs from the checkpoint.")
-        if saved["config"] != config:
+        if {key: value for key, value in saved["config"].items() if key != "data"} != {
+            key: value for key, value in config.items() if key != "data"
+        }:
             raise ValueError("Resume refused: configuration differs from the checkpoint. Use the saved configuration.")
         if saved.get("overfit_batches") != overfit_batches:
             raise ValueError("Resume refused: overfit_batches differs from the checkpoint.")

@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from adp.stress import StressEligibilityError, apply_stress
+from adp.stress import StressEligibilityError, apply_stress, validate_stress_spec
 
 
 def scene_fixture():
@@ -25,6 +25,28 @@ def scene_fixture():
 
 
 class StressTests(unittest.TestCase):
+    def test_automatic_cut_in_tries_other_actors_but_explicit_selection_is_strict(self):
+        scene = scene_fixture()
+        scene['history'][1, :, 1] = 30
+        result = apply_stress(scene, {'kind': 'cut_in', 'severity': .35})
+        self.assertEqual(result['stress']['actor_id'], 'focal')
+        self.assertEqual(result['stress']['target_lane_id'], 'adjacent')
+        np.testing.assert_array_equal(result['history'][1], scene['history'][1])
+        with self.assertRaisesRegex(StressEligibilityError, 'more than 4 m'):
+            apply_stress(scene, {'kind': 'cut_in', 'severity': .35, 'actor_id': 'neighbor'})
+        scene['map_lanes'] = []
+        with self.assertRaisesRegex(StressEligibilityError, 'No retained moving actor'):
+            apply_stress(scene, {'kind': 'cut_in', 'severity': .35})
+
+    def test_invalid_stress_configuration_is_rejected_before_reading_scene(self):
+        for seed in (-1, 2**32, 1.5, True, None):
+            with self.assertRaisesRegex(ValueError, 'seed'):
+                apply_stress({}, {'kind': 'dropout', 'seed': seed})
+        for severity in (None, 'bad', float('inf')):
+            with self.assertRaisesRegex(ValueError, 'severity'):
+                validate_stress_spec({'kind': 'braking', 'severity': severity})
+        self.assertEqual(validate_stress_spec({'kind': 'cut_in', 'severity': 0, 'seed': 2**32-1}), ('cut_in', 0., 2**32-1))
+
     def test_cut_in_stitches_only_unambiguous_contiguous_segments(self):
         scene = scene_fixture()
         scene['map_lanes'][0]['centerline'] = [[-10,3],[10,3]]

@@ -2,8 +2,9 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
-from adp.data import collate_scenes, load_av2, public_scene, to_local, to_world
+from adp.data import collate_scenes, load_av2, preprocess, preprocessing_hash, public_scene, to_local, to_world
 
 
 def av2_fixture(tmp_path):
@@ -44,3 +45,37 @@ def test_selection_and_coordinates_do_not_read_futures(tmp_path):
     batch = collate_scenes([first, load_av2(path, map_path, max_actors=3)])
     assert batch["history"].shape == (2,3,50,8)
     assert not batch["actor_mask"][0,2]
+
+
+def test_preprocessing_equivalent_options_preserve_fingerprint(tmp_path):
+    raw, cache = tmp_path/"raw", tmp_path/"cache"
+    raw.mkdir()
+    (raw/"manifest.json").write_text(json.dumps({"splits": {"train": []}}), encoding="utf-8")
+    preprocess(raw, cache, workers=1)
+    config_path = cache/"preprocessing.json"
+    assert json.loads(config_path.read_text()) == {
+        "version": 1, "max_actors": 32, "max_polylines": 128, "map_radius": 100,
+    }
+    assert '"map_radius": 100.0' not in config_path.read_text()
+    original = config_path.read_bytes()
+    fingerprint = preprocessing_hash(cache)
+    preprocess(raw, cache, workers=1, max_actors=32, max_polylines=128, map_radius=100.0)
+    assert config_path.read_bytes() == original
+    assert preprocessing_hash(cache) == fingerprint
+    with pytest.raises(ValueError, match="options changed"):
+        preprocess(raw, cache, workers=1, map_radius=101)
+    assert config_path.read_bytes() == original
+
+
+def test_preprocessing_legacy_defaults_keep_original_bytes(tmp_path):
+    raw, cache = tmp_path/"raw", tmp_path/"cache"
+    raw.mkdir()
+    cache.mkdir()
+    (raw/"manifest.json").write_text(json.dumps({"splits": {"train": []}}), encoding="utf-8")
+    config_path = cache/"preprocessing.json"
+    for original in (b'{ "version": 1 }\n', b'{ "map_radius": 100.0, "version": 1 }\n'):
+        config_path.write_bytes(original)
+        fingerprint = preprocessing_hash(cache)
+        preprocess(raw, cache, workers=1, map_radius=100)
+        assert config_path.read_bytes() == original
+        assert preprocessing_hash(cache) == fingerprint

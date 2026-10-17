@@ -46,7 +46,7 @@ export default function App() {
     const [healthResult, libraryResult] = await Promise.allSettled([
       request<Health>('/health'), request<{ scenarios: ScenarioSummary[]; total: number }>('/scenarios'),
     ]);
-    if (healthResult.status === 'fulfilled') setHealth(healthResult.value);
+    setHealth(healthResult.status === 'fulfilled' ? healthResult.value : null);
     if (libraryResult.status === 'fulfilled') {
       setScenarios(libraryResult.value.scenarios);
       setActiveId((previous) => libraryResult.value.scenarios.some((item) => item.id === previous) ? previous : (libraryResult.value.scenarios.find((item) => item.split === 'evaluation') ?? libraryResult.value.scenarios[0])?.id ?? '');

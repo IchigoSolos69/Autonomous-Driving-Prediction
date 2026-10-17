@@ -316,8 +316,7 @@ def _aggregate(records):
     positives = int(sum(truth))
     result["risk"] = {"raw": binary_scores(raw, truth), "calibrated": binary_scores(calibrated, truth),
                       "eligible_count": len(truth), "positive_count": positives,
-                      "prevalence": positives / len(truth) if truth else None,
-                      "status": "sufficient" if positives >= 50 else "insufficient_positive_events"}
+                      "prevalence": positives / len(truth) if truth else None}
     mode = [(record["mode_confidence"], record["mode_correct"]) for record in records
             if record.get("mode_confidence") is not None]
     result["mode_reliability"] = reliability([pair[0] for pair in mode], [pair[1] for pair in mode])
@@ -349,13 +348,30 @@ def _aggregate(records):
     return result
 
 
-def summarize_records(records, bootstrap=200, seed=42):
+def summarize_records(records, bootstrap=200, seed=42, calibration=None):
     """Aggregate actors, resampling whole scenarios for percentile 95% intervals."""
     if bootstrap < 0:
         raise ValueError("bootstrap must be nonnegative")
     # Multiple records for one scenario stay in the same bootstrap cluster.
     records = list(records)
     summary = _aggregate(records)
+    risk = summary["risk"]
+    risk_fit = calibration.get("risk", {}) if calibration is not None else {}
+    calibration_positives = risk_fit.get("positives")
+    evaluation_sufficient = risk["positive_count"] >= 50
+    calibration_sufficient = calibration_positives is not None and calibration_positives >= 50
+    risk["evaluation_status"] = "sufficient" if evaluation_sufficient else "insufficient_positive_events"
+    risk["calibration"] = {
+        "applied": calibration is not None, "fitted": bool(risk_fit.get("fitted", False)),
+        "eligible_count": risk_fit.get("count"), "positive_count": calibration_positives,
+        "status": ("not_applied" if calibration is None else
+                   "insufficient_positive_events" if not calibration_sufficient else
+                   "fitted" if risk_fit.get("fitted") else "not_fitted"),
+    }
+    risk["status"] = ("insufficient_positive_events" if not evaluation_sufficient else
+                      "uncalibrated" if calibration is None else
+                      "insufficient_positive_events" if not calibration_sufficient else
+                      "sufficient" if risk_fit.get("fitted") else "not_fitted")
     groups = {}
     for index, record in enumerate(records):
         groups.setdefault(record.get("scenario_id", str(index)), []).append(record)

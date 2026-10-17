@@ -65,6 +65,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $ProjectExtras = "$ProjectRoot`[dev,desktop]"
 if ($WithAv2) { $ProjectExtras = "$ProjectRoot`[dev,av2,desktop]" }
+Invoke-ProjectPip -PipArguments @("install", "--no-cache-dir", "setuptools>=78.1.1,<82")
 Invoke-ProjectPip -PipArguments @("install", "--no-cache-dir", "-e", $ProjectExtras)
 if (-not $CpuOnly) {
     & $EnvironmentPython -c "from adp.training import gpu_smoke_test; import json; print(json.dumps(gpu_smoke_test(),indent=2))"

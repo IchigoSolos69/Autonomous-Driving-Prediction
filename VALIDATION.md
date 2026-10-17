@@ -10,7 +10,7 @@ This is an implemented research prototype with a preliminary three-epoch experim
 - Trained the full subset for three epochs in 266.1 seconds. Measured training throughput was 64.6 examples/s; peak PyTorch allocated memory was 132,032,512 bytes (allocator memory, excluding driver and other allocations).
 - Ran 300 tiny-batch epochs on four real training scenes. minFDE on those training scenes fell from the constant-velocity value of 4.12 m to 2.14 m. This verifies learning and overfitting mechanics, not generalization.
 - Resumed a GPU-trained checkpoint on CPU and completed another training epoch.
-- Passed 41 Python tests, six frontend tests, the TypeScript/production build, and dependency consistency checks. The test client emits an upstream Starlette/httpx deprecation warning.
+- Passed 55 Python tests (plus four subtests), eight frontend tests, the TypeScript/production build, and dependency consistency checks. The test client emits an upstream Starlette/httpx deprecation warning.
 - Exercised live trained inference, baseline fallback, shared modes, reference overlays, stress comparisons, actor selection, keyboard scrubbing, wide layout and mobile drawers in the original browser interface. The 390 px mobile viewport had no horizontal overflow. These checks predate the native desktop host.
 
 ## Held-out results
@@ -40,16 +40,36 @@ Risk Brier score was 0.1391 before and 0.1413 after the fitted adjustment. These
 
 ## Controlled stress checks
 
-Severity 0.35, seed 42, first 32 held-out scenarios in immutable manifest order. The clean column uses **exactly the same supported scenarios** as its stressed counterpart. Reports and matched scenario IDs are in `artifacts/experiment/stress/`.
+Severity 0.35, seed 42, first 32 held-out scenarios in immutable manifest order. The clean column uses **exactly the same supported scenarios** as its stressed counterpart. The post-audit rerun, reports and matched scenario IDs are in `artifacts/audit-fixes/stress/`; the original reports remain in `artifacts/experiment/stress/`.
 
 | Intervention | Evaluated / attempted | Matched clean minFDE, m | Stressed minFDE, m |
 |---|---:|---:|---:|
 | Position noise | 32 / 32 | 7.121 | 33.746 |
 | History dropout | 32 / 32 | 7.121 | 6.667 |
 | Braking | 32 / 32 | 7.121 | 6.946 |
-| Adjacent-lane cut-in | 5 / 32 | 7.699 | 6.986 |
+| Adjacent-lane cut-in | 18 / 32 | 8.673 | 7.428 |
 
-Unsupported cut-ins are explicitly excluded with reasons. Position noise recomputes velocities by finite differences, amplifying positional error; the observed degradation is specific to this protocol. Easier scripted futures or smoothing from dropout can reduce error on this small sample. None of these results establishes closed-loop robustness. Risk calibration evidence was unavailable in these stress subsets.
+Automatic cut-ins now try all eligible moving actors until one has suitable lane geometry. This increases support from the earlier 5/32 to 18/32; explicitly selected actors still fail with an explanation when unsupported. Remaining exclusions record reasons. Position noise recomputes velocities by finite differences, amplifying positional error; the observed degradation is specific to this protocol. Easier scripted futures or smoothing from dropout can reduce error on this small sample. None of these results establishes closed-loop robustness. Risk calibration evidence was unavailable in these stress subsets.
+
+## Audit fixes and repeat checks
+
+All seven audit findings are fixed. Resume refuses occupied destinations from another run; matching preprocessing settings preserve their original file bytes; reports carry both calibration and evaluation positive-event counts; invalid stress settings fail before data loading or report writes; automatic cut-ins search eligible actors; failed health refresh clears the connection indicator; unused data configuration was removed in favor of existing CLI flags. Legacy checkpoint configurations remain compatible when only that unused block differs.
+
+Repeated preprocessing over all 7,000 production scenes with explicit `--map-radius 100` wrote zero new scenes and preserved preprocessing hash `b24050f4790a24a4b6666804d80d9a986a395d93f34f3154b47286011ac266bf`. Downloaded a fresh four-scene public S3 test subset, preprocessed it and loaded its training scenario through the official AV2 API.
+
+Resumed the original run for one additional full epoch over 5,000 training and 500 validation scenarios in `artifacts/audit-fixes/resumed-training/`. It completed in 110.4 seconds at 58.1 training examples/s, with peak allocated CUDA memory 132,029,440 bytes. A separate four-scene smoke run trained on CUDA and continued on CPU; its CPU-saved checkpoint loaded on both devices with maximum trajectory difference 0.00000763 m. These are continuation checks. The application continues to load the original three-epoch checkpoint.
+
+Refit calibration on its reserved 500-scene split into `artifacts/audit-fixes/recalibration/` and reran the original checkpoint on all 1,000 held-out scenarios into `artifacts/audit-fixes/evaluation/`. Displacement results reproduce the table above. Risk reports now explicitly show two calibration positives and 14 evaluation positives, with insufficient evidence retained. Original weights and report files are preserved.
+
+Built the Python wheel in an isolated build environment and rebuilt the Windows launcher. Native-window checks exercised trained loading, recorded-future overlays, playback through frame 109, and selecting/running the constant-velocity baseline before restoring the trained model. Corrected automatic cut-in requests also passed through the desktop-owned service. Component tests cover failed refresh and a late prediction completing after a scenario switch. Machine-readable repeat-check results are in `artifacts/audit-fixes/verification.json`.
+
+## Dependency advisory checks
+
+`npm audit` reported zero known advisories. `pip check` passes. Upgraded environment setuptools from 78.1.0 to 81.0.0, which satisfies the installed PyTorch requirement `setuptools<82` and removes the earlier download-path traversal advisory. Isolated project builds require setuptools 83 or later. The scanner is installed separately under ignored `artifacts/validation-tools/`.
+
+Two distinct upstream advisories remain recorded: [setuptools Unicode exclusion matching on macOS](https://github.com/pypa/setuptools/security/advisories/GHSA-h35f-9h28-mq5c), and the [PyTorch scripted-class crash](https://github.com/pytorch/pytorch/issues/149623). The former concerns source-distribution publishing on macOS; this delivery is Windows and uses patched isolated build tooling. The application does not accept TorchScript source and its model uses eager PyTorch; the installed 2.11 CUDA runtime still receives the latter version-based advisory. A move to the advisory database's patched PyTorch 2.13 runtime has not been tested. These are documented residual findings, not a clean Python vulnerability scan.
+
+Full scanner output is in `artifacts/python-dependency-audit.json` and `artifacts/audit-fixes/torch-dependency-audit.json`. The environment scan skips the editable project and cannot resolve the CUDA version suffix, so the base PyTorch 2.11.0 release was checked separately. No live Colab session or clean Windows-machine installation was performed; notebook code cells were parsed and the current Windows environment was exercised.
 
 ## Open the local experiment
 

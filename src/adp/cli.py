@@ -13,8 +13,12 @@ def _evaluate(args, stress=False):
     from adp.metrics import evaluate_predictions, summarize_records
     from adp.model import ForecastModel, constant_velocity, model_inputs
     from adp.reporting import write_report
-    from adp.stress import apply_stress
+    from adp.stress import StressEligibilityError, apply_stress, validate_stress_spec
     from adp.training import load_checkpoint, resolve_device
+    stress_spec = None
+    if stress:
+        kind, severity, seed = validate_stress_spec({"kind": args.kind, "severity": args.severity, "seed": args.seed})
+        stress_spec = {"kind": kind, "severity": severity, "seed": seed}
     device = resolve_device(args.device)
     dataset = CachedDataset(args.cache_dir, args.split)
     calibration = read_json(args.calibration) if args.calibration else None
@@ -40,8 +44,8 @@ def _evaluate(args, stress=False):
         scene = dataset[index]
         if stress:
             try:
-                scene = apply_stress(scene, {"kind": args.kind, "severity": args.severity, "seed": args.seed})
-            except ValueError as error:
+                scene = apply_stress(scene, stress_spec)
+            except StressEligibilityError as error:
                 skipped.append({"scenario_id": scene["id"], "reason": str(error)})
                 continue
         batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in collate_scenes([scene]).items()}
@@ -50,7 +54,8 @@ def _evaluate(args, stress=False):
         records.extend(evaluate_predictions(outputs, batch, calibration))
         if (index+1) % 10 == 0:
             print(f"Evaluated {index+1}/{total} scenarios", flush=True)
-    report = summarize_records(records, bootstrap=args.bootstrap, seed=args.seed)
+    report = summarize_records(records, bootstrap=args.bootstrap, seed=args.seed, calibration=calibration)
+    report["risk"]["raw_source"] = "trained_risk_head" if network else "constant_velocity_heuristic"
     report.update({"split": args.split, "model": "trained" if network else "constant_velocity",
                    "manifest_hash": dataset.manifest_hash, "calibration_applied": calibration is not None,
                    "available_scenarios": len(dataset), "scenario_limit": args.limit,
@@ -58,7 +63,7 @@ def _evaluate(args, stress=False):
                    "protocol": "retained complete scored dynamic actors; joint modes; miss threshold 2m; six modes",
                    "risk_definition": "minimum centre distance <3m to another retained dynamic actor over6s",
                    "footprints_m": {"vehicle": [4.5, 1.8], "pedestrian": [.6, .6], "motorcyclist": [2, .8], "cyclist": [1.8, .6], "bus": [12, 2.5]},
-                   "stress": {"kind": args.kind, "severity": args.severity, "other_agents_reactive": False} if stress else None,
+                   "stress": {**stress_spec, "other_agents_reactive": False} if stress else None,
                    "skipped": skipped})
     write_report(args.output_dir, report, records)
     return report

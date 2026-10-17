@@ -11,6 +11,22 @@ class StressEligibilityError(ValueError):
     """The selected actor/map cannot support the requested counterfactual."""
 
 
+def validate_stress_spec(spec):
+    kind = spec.get("kind")
+    if kind not in ("position_noise", "dropout", "braking", "cut_in"):
+        raise ValueError("kind must be position_noise, dropout, braking, or cut_in")
+    try:
+        severity = float(spec.get("severity", .35))
+    except (TypeError, ValueError) as error:
+        raise ValueError("severity must be a finite number in [0,1]") from error
+    if not np.isfinite(severity) or not 0 <= severity <= 1:
+        raise ValueError("severity must be a finite number in [0,1]")
+    seed = spec.get("seed", 42)
+    if isinstance(seed, bool) or not isinstance(seed, (int, np.integer)) or not 0 <= seed <= 2**32-1:
+        raise ValueError("seed must be an integer in [0,4294967295]")
+    return kind, severity, int(seed)
+
+
 def _features(history, mask):
     """Recompute motion from observed positions without looking at future data."""
     for actor in range(len(history)):
@@ -34,7 +50,7 @@ def _active(scene):
     return active
 
 
-def _counterfactual_actor(scene, actor_id):
+def _counterfactual_actors(scene, actor_id):
     history, mask = scene["history"], scene["history_mask"]
     ids = list(scene["actor_ids"])
     if actor_id is not None and actor_id not in ids:
@@ -42,11 +58,14 @@ def _counterfactual_actor(scene, actor_id):
     candidates = [ids.index(actor_id)] if actor_id is not None else list(range(1, len(ids))) + [0]
     types = np.asarray(scene["actor_types"])
     active = _active(scene)
+    eligible = []
     for actor in candidates:
         if (active[actor] and types[actor] in (0, 2, 3, 4)
                 and mask[actor, -11:].all()
                 and np.linalg.norm(history[actor, -11, 2:4]) > 0.5):
-            return actor
+            eligible.append(actor)
+    if eligible:
+        return eligible
     raise StressEligibilityError("Choose a moving vehicle/cyclist with 11 consecutive final history states (speed > 0.5 m/s).")
 
 
@@ -165,13 +184,7 @@ def apply_stress(scene: dict, spec: dict) -> dict:
     only its initial observed state; all other agents replay their logged paths.
     A zero severity is always an exact trajectory/mask no-op.
     """
-    kind = spec.get("kind")
-    if kind not in ("position_noise", "dropout", "braking", "cut_in"):
-        raise ValueError("kind must be position_noise, dropout, braking, or cut_in")
-    severity = float(spec.get("severity", 0.35))
-    if not np.isfinite(severity) or not 0 <= severity <= 1:
-        raise ValueError("severity must be a finite number in [0,1]")
-    seed = int(spec.get("seed", 42))
+    kind, severity, seed = validate_stress_spec(spec)
     result = deepcopy(scene)
     history = np.asarray(result["history"])
     mask = np.asarray(result["history_mask"], dtype=bool).copy()
@@ -213,9 +226,22 @@ def apply_stress(scene: dict, spec: dict) -> dict:
         _features(changed_history, changed_mask)
         history[selected] = changed_history
         return result
-    actor = _counterfactual_actor(result, spec.get("actor_id"))
-    metadata["actor_id"] = result["actor_ids"][actor]
+    candidates = _counterfactual_actors(result, spec.get("actor_id"))
+    actor = candidates[0]
     times = np.arange(71, dtype=np.float64) * 0.1
+    if kind == "cut_in":
+        for actor in candidates:
+            try:
+                trajectory, details = _cut_in(result, actor, severity, times)
+                break
+            except StressEligibilityError as error:
+                if spec.get("actor_id") is not None:
+                    raise
+                last_reason = str(error)
+        else:
+            raise StressEligibilityError(f"No retained moving actor supports this cut-in. Last rejection: {last_reason}")
+        metadata.update(details)
+    metadata["actor_id"] = result["actor_ids"][actor]
     start = history[actor, -11].copy()
     speed = np.linalg.norm(start[2:4])
     if kind == "braking":
@@ -224,9 +250,6 @@ def apply_stress(scene: dict, spec: dict) -> dict:
         travel = speed * moving_time - 0.5 * deceleration * moving_time ** 2
         trajectory = start[:2] + travel[:, None] * (start[2:4] / speed)
         metadata.update({"deceleration_mps2": deceleration, "stop_seconds": float(speed / deceleration)})
-    else:
-        trajectory, details = _cut_in(result, actor, severity, times)
-        metadata.update(details)
     history[actor, -11:, :2] = trajectory[:11]
     selected_history, selected_mask = history[actor:actor + 1].copy(), mask[actor:actor + 1].copy()
     _features(selected_history, selected_mask)

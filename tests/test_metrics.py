@@ -126,6 +126,37 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary["risk"]["status"], "insufficient_positive_events")
         self.assertEqual(summary, summarize_records(records, bootstrap=200, seed=42))
 
+    def test_risk_evidence_requires_fitted_calibration_and_both_positive_counts(self):
+        for calibration_positives, evaluation_positives, fitted, expected in (
+            (2, 50, True, "insufficient_positive_events"),
+            (50, 49, True, "insufficient_positive_events"),
+            (50, 50, False, "not_fitted"),
+            (50, 50, True, "sufficient"),
+        ):
+            with self.subTest(calibration_positives=calibration_positives,
+                              evaluation_positives=evaluation_positives, fitted=fitted):
+                record = {"risk_labels": [1] * evaluation_positives,
+                          "risk_raw_probabilities": [0.5] * evaluation_positives,
+                          "risk_calibrated_probabilities": [0.6] * evaluation_positives}
+                calibration = {"risk": {"positives": calibration_positives,
+                                        "count": calibration_positives + 20, "fitted": fitted}}
+                risk = summarize_records([record], bootstrap=0, calibration=calibration)["risk"]
+                self.assertEqual(risk["status"], expected)
+                self.assertEqual(risk["positive_count"], evaluation_positives)
+                self.assertEqual(risk["calibration"]["positive_count"], calibration_positives)
+                self.assertEqual(risk["calibration"]["eligible_count"], calibration_positives + 20)
+                self.assertEqual(risk["calibration"]["fitted"], fitted)
+
+    def test_raw_risk_scores_are_not_called_calibrated_with_many_events(self):
+        record = {"risk_labels": [1] * 50, "risk_raw_probabilities": [0.5] * 50,
+                  "risk_calibrated_probabilities": [0.5] * 50}
+        risk = summarize_records([record], bootstrap=0)["risk"]
+        self.assertEqual(risk["status"], "uncalibrated")
+        self.assertEqual(risk["evaluation_status"], "sufficient")
+        self.assertEqual(risk["calibration"]["status"], "not_applied")
+        unknown = summarize_records([record], bootstrap=0, calibration={"risk": {"fitted": True}})["risk"]
+        self.assertEqual(unknown["status"], "insufficient_positive_events")
+
 
 if __name__ == "__main__":
     unittest.main()
