@@ -73,3 +73,43 @@ def test_map_penalty_requires_vehicle_type_and_known_map_coverage():
     batch['actor_types'].fill_(0)
     outputs['map_enabled'] = False
     assert forecast_loss(outputs, batch)['offroad'].item() == 0
+
+
+def test_shared_world_ce_uses_detached_complete_scored_joint_fde():
+    batch = batch_fixture()
+    batch["scored_mask"] = torch.tensor([[True, False, True], [False, False, False]])
+    batch["future_mask"][0, 2, -1] = False
+    batch["future"][0, 2] = float("nan")
+    means = torch.zeros(2, 2, 3, 60, 2)
+    means[0, 0, 0, -1, 0] = 4
+    means[0, 1, 0, :-1, 0] = 100
+    means[0, 1, 1] = 1000
+    means.requires_grad_()
+    logits = torch.tensor([[2., 0.], [0., 2.]], requires_grad=True)
+    outputs = {"means": means, "scales": torch.ones_like(means), "logits": logits,
+               "risk_logits": torch.zeros(2, 3), "map_enabled": False}
+    baseline = forecast_loss(outputs, batch)
+    candidate = forecast_loss({**outputs, "shared_world_ce_weight": .1}, batch)
+    expected = torch.nn.functional.cross_entropy(logits[:1], torch.tensor([1]))
+    torch.testing.assert_close(candidate["shared_world_ce"], expected)
+    torch.testing.assert_close(candidate["loss"], baseline["loss"] + .1*expected)
+    assert int(candidate["world_supervision_count"]) == 1
+    candidate["shared_world_ce"].backward()
+    assert means.grad is None
+    torch.testing.assert_close(logits.grad[1], torch.zeros(2))
+    assert logits.grad[0, 0] > 0
+
+
+def test_shared_world_ce_skips_scenes_without_complete_scored_actors():
+    batch = batch_fixture()
+    batch["future_mask"][:] = False
+    batch["future"][:] = float("nan")
+    outputs = constant_velocity(model_inputs(batch))
+    outputs["logits"].requires_grad_()
+    outputs["shared_world_ce_weight"] = .1
+    losses = forecast_loss(outputs, batch)
+    assert losses["shared_world_ce"].item() == 0
+    assert losses["world_supervision_count"].item() == 0
+    assert torch.isfinite(losses["loss"])
+    losses["shared_world_ce"].backward()
+    torch.testing.assert_close(outputs["logits"].grad, torch.zeros_like(outputs["logits"]))

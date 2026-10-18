@@ -300,9 +300,14 @@ def load_av2(parquet_path, map_path, max_actors=32, max_polylines=128, map_radiu
 
 def _cache_worker(task):
     raw_dir, cache_dir, split, scenario_id, options = task
+    options = dict(options)
+    minimum_free_gib = options.pop("_minimum_free_gib", 0)
     target = cache_dir/split/f"{scenario_id}.npz"
     written = not target.exists()
     if written:
+        if minimum_free_gib:
+            from adp.research import ensure_space
+            ensure_space(cache_dir, minimum_free_gib, 16*1024**2)
         directory = raw_dir/split/scenario_id
         parquet = directory/f"scenario_{scenario_id}.parquet"
         map_path = directory/f"log_map_archive_{scenario_id}.json"
@@ -323,7 +328,7 @@ def _cache_worker(task):
     return item, audit, written
 
 
-def preprocess(raw_dir="data/raw", cache_dir="data/cache", workers=4, **options):
+def preprocess(raw_dir="data/raw", cache_dir="data/cache", workers=4, minimum_free_gib=0, **options):
     defaults = {"max_actors": 32, "max_polylines": 128, "map_radius": 100}
     options = {**defaults, **options}
     radius = float(options["map_radius"])
@@ -350,7 +355,7 @@ def preprocess(raw_dir="data/raw", cache_dir="data/cache", workers=4, **options)
         target_dir = cache_dir / split
         target_dir.mkdir(exist_ok=True)
         for scenario_id in ids:
-            tasks.append((raw_dir, cache_dir, split, scenario_id, options))
+            tasks.append((raw_dir, cache_dir, split, scenario_id, {**options, "_minimum_free_gib": minimum_free_gib}))
 
     def collect(results):
         nonlocal count

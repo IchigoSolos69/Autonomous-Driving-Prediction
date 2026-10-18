@@ -1,0 +1,60 @@
+name: Build private Windows beta
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Manual beta version (no automatic publication)
+        required: true
+        default: 0.1.0-beta
+      upload_packages:
+        description: Upload large installers/payloads (check your account's free storage allowance first)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  freeze:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [cpu, nvidia]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install NSIS
+        run: choco install nsis --version=3.13 -y --no-progress
+      - name: Freeze, test, and create per-user installer
+        env:
+          BETA_VERSION: ${{ inputs.version }}
+          BETA_EDITION: ${{ matrix.edition }}
+        run: ./scripts/build-release.ps1 -Edition $env:BETA_EDITION -Version $env:BETA_VERSION -Python python
+      - name: Keep checksums and measured build checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: interaction-lab-checks-${{ matrix.edition }}-${{ inputs.version }}
+          retention-days: 1
+          path: |
+            artifacts/release-build/${{ matrix.edition }}/dist/*.sha256
+            artifacts/release-build/${{ matrix.edition }}/dist/SHA256SUMS
+            artifacts/release-build/${{ matrix.edition }}/dist/installer-build.json
+            artifacts/release-build/${{ matrix.edition }}/runtime-qualification.json
+            artifacts/release-build/${{ matrix.edition }}/frozen-self-test.json
+            artifacts/release-build/${{ matrix.edition }}/build-complete.json
+            artifacts/release-build/${{ matrix.edition }}/release-metadata/
+      - name: Keep packages only when explicitly selected
+        if: inputs.upload_packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: interaction-lab-packages-${{ matrix.edition }}-${{ inputs.version }}
+          retention-days: 1
+          compression-level: 0
+          path: |
+            artifacts/release-build/${{ matrix.edition }}/dist/*Setup.exe
+            artifacts/release-build/${{ matrix.edition }}/dist/*-payload.zip

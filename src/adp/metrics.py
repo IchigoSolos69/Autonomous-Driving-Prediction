@@ -201,6 +201,55 @@ def _calibrated_logits(logits, calibration, kind):
     return logits / temperature
 
 
+def matched_overlap_diagnostics(means, future, future_mask, actor_types, dynamic, probabilities,
+                                initial_positions, initial_headings, future_headings=None):
+    """Compare identical valid pairs/timestamps; retain existing-cutoff overlaps separately."""
+    active = np.flatnonzero(dynamic & np.isin(actor_types, list(FOOTPRINT_DIMENSIONS)))
+    pairs = [(a, b) for offset, a in enumerate(active) for b in active[offset+1:]]
+    if not pairs:
+        return {"matched_pair_count": 0, "matched_pair_timestamps": 0}
+    aa, bb = np.asarray(pairs).T
+    valid = future_mask[aa] & future_mask[bb] & np.isfinite(future[aa]).all(-1) & np.isfinite(future[bb]).all(-1)
+    eligible = valid.any(-1)
+    if not eligible.any():
+        return {"matched_pair_count": 0, "matched_pair_timestamps": 0}
+    dimensions = np.asarray([FOOTPRINT_DIMENSIONS.get(int(t), (0., 0.)) for t in actor_types])
+    def headings(positions):
+        previous = np.broadcast_to(initial_positions, positions.shape[:2]+(2,)).copy()
+        angle = np.broadcast_to(initial_headings, positions.shape[:2]).copy()
+        result = np.empty(positions.shape[:-1])
+        for t in range(positions.shape[2]):
+            change = positions[:, :, t] - previous
+            moving = np.isfinite(change).all(-1) & (np.linalg.norm(change, axis=-1) > 1e-4)
+            angle = np.where(moving, np.arctan2(change[..., 1], change[..., 0]), angle)
+            result[:, :, t] = angle
+            previous = np.where(np.isfinite(positions[:, :, t]), positions[:, :, t], previous)
+        return result
+    predicted_headings = headings(means)
+    reference_headings = future_headings if future_headings is not None else headings(future[None])[0]
+    dims_a = (dimensions[aa, 0][None, :, None], dimensions[aa, 1][None, :, None])
+    dims_b = (dimensions[bb, 0][None, :, None], dimensions[bb, 1][None, :, None])
+    hits = oriented_boxes_overlap(means[:, aa], predicted_headings[:, aa], dims_a,
+                                  means[:, bb], predicted_headings[:, bb], dims_b) & valid[None]
+    reference = oriented_boxes_overlap(future[None, aa], reference_headings[None, aa], dims_a,
+                                       future[None, bb], reference_headings[None, bb], dims_b)[0] & valid
+    initial = oriented_boxes_overlap(initial_positions[aa], initial_headings[aa],
+                                     (dimensions[aa, 0], dimensions[aa, 1]),
+                                     initial_positions[bb], initial_headings[bb],
+                                     (dimensions[bb, 0], dimensions[bb, 1]))
+    predicted_pairs, reference_pairs = hits.any(-1), reference.any(-1)
+    new_pairs = ~initial & eligible
+    count = int(eligible.sum())
+    return {"matched_pair_count": count, "matched_pair_timestamps": int(valid.sum()),
+            "initial_overlap_pair_rate": float(initial[eligible].mean()),
+            "reference_overlap_scene": float(reference_pairs.any()),
+            "predicted_matched_overlap_scene": float(np.dot(probabilities, predicted_pairs.any(-1))),
+            "reference_new_overlap_scene": float((reference_pairs & new_pairs).any()),
+            "predicted_matched_new_overlap_scene": float(np.dot(probabilities, (predicted_pairs & new_pairs).any(-1))),
+            "reference_overlap_pair_rate": float(reference_pairs.sum()/count),
+            "predicted_matched_overlap_pair_rate": float(np.dot(probabilities, predicted_pairs.sum(-1)/count))}
+
+
 def evaluate_predictions(outputs, batch, calibration=None):
     """Build one JSON-safe record per scene; no predictions are paired across modes.
 
@@ -266,6 +315,7 @@ def evaluate_predictions(outputs, batch, calibration=None):
             best = fde.argmin(axis=0)
             best_fde = fde[best, np.arange(best.size)]
             record.update({"minADE": ade.min(axis=0).tolist(), "minFDE": best_fde.tolist(),
+                           "ADE_at_FDE_best_mode": ade[best, np.arange(best.size)].tolist(),
                            "miss_rate": (best_fde > 2).astype(float).tolist(),
                            "brierFDE": (best_fde + (1 - probabilities[index, best]) ** 2).tolist(),
                            "jointADE": float(ade.mean(axis=-1).min()),
@@ -275,6 +325,7 @@ def evaluate_predictions(outputs, batch, calibration=None):
                 record.update({"focal_minADE": float(ade[:, 0].min()), "focal_minFDE": focal_fde,
                                "focal_miss_rate": float(focal_fde > 2)})
             chosen = int(fde.mean(axis=-1).argmin())
+            record["jointADE_at_jointFDE_world"] = float(ade[chosen].mean())
             record["mode_confidence"] = float(probabilities[index].max())
             record["mode_correct"] = int(probabilities[index].argmax() == chosen)
             record["mode_confidence_raw"] = float(raw_probabilities[index].max())
@@ -295,13 +346,18 @@ def evaluate_predictions(outputs, batch, calibration=None):
         overlaps = footprint_collision_proxy(means[index], types[index], dynamic[index], initial_positions, initial_headings)
         record["footprint_collision_proxy"] = float(np.dot(probabilities[index], overlaps["any_overlap"]))
         record["footprint_actor_collision_proxy"] = float(np.dot(probabilities[index], overlaps["actor_rate"]))
+        if initial_positions is not None:
+            reference_headings = _numpy(batch["future_heading"])[index] if "future_heading" in batch else None
+            record["matched_overlap"] = matched_overlap_diagnostics(
+                means[index], future[index], valid[index], types[index], dynamic[index], probabilities[index],
+                initial_positions, initial_headings, reference_headings)
         records.append(record)
     return records
 
 
 def _aggregate(records):
     result = {"scenario_count": len(records)}
-    keys = ("minADE", "minFDE", "miss_rate", "brierFDE", "jointADE", "jointFDE", "NLL",
+    keys = ("minADE", "minFDE", "ADE_at_FDE_best_mode", "miss_rate", "brierFDE", "jointADE", "jointFDE", "jointADE_at_jointFDE_world", "NLL",
             "focal_minADE", "focal_minFDE", "focal_miss_rate",
             "footprint_collision_proxy", "footprint_actor_collision_proxy")
     for key in keys:
@@ -310,6 +366,14 @@ def _aggregate(records):
             value = record.get(key)
             values.extend(value if isinstance(value, list) else [] if value is None else [value])
         result[key] = float(np.mean(values)) if values else None
+    diagnostics = [r["matched_overlap"] for r in records if r.get("matched_overlap", {}).get("matched_pair_count", 0)]
+    diagnostic_keys = ("initial_overlap_pair_rate", "reference_overlap_scene", "predicted_matched_overlap_scene",
+                       "reference_new_overlap_scene", "predicted_matched_new_overlap_scene", "reference_overlap_pair_rate",
+                       "predicted_matched_overlap_pair_rate")
+    result["matched_overlap"] = {key: float(np.mean([r[key] for r in diagnostics])) if diagnostics else None for key in diagnostic_keys}
+    result["matched_overlap"].update(scenario_count=len(diagnostics),
+        matched_pair_count=sum(r["matched_pair_count"] for r in diagnostics),
+        matched_pair_timestamps=sum(r["matched_pair_timestamps"] for r in diagnostics))
     truth = [value for record in records for value in record.get("risk_labels", [])]
     raw = [value for record in records for value in record.get("risk_raw_probabilities", [])]
     calibrated = [value for record in records for value in record.get("risk_calibrated_probabilities", [])]

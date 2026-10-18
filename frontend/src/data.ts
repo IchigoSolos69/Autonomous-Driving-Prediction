@@ -1,7 +1,9 @@
 import type { Actor, Point, Prediction, Scenario } from './types';
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, init);
+export async function request<T>(path: string, init?: RequestInit, desktopToken?: string): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (desktopToken) headers.set('X-Interaction-Token', desktopToken);
+  const response = await fetch(`/api${path}`, { ...init, headers });
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
     try {

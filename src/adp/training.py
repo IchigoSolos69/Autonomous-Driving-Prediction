@@ -227,14 +227,21 @@ def train(
     config: dict, cache_dir: str | Path, output_dir: str | Path,
     epochs: int = 20, device: str = "auto", resume: str | Path | None = None,
     overfit_batches: int | None = None,
+    max_runtime_seconds: float | None = None,
 ) -> dict:
-    """Train until the requested total epoch count; resume at epoch boundaries."""
+    """Resume committed optimizer groups; budget checks bracket groups/validation batches.
+
+    A slice can overrun by one optimizer group or validation batch, plus startup
+    and checkpoint I/O. Uncommitted validation is restarted without training replay.
+    """
     from adp.data import CachedDataset, collate_scenes
     from adp.model import ForecastModel, forecast_loss, model_inputs
 
     started = time.monotonic()
     if epochs < 1 or (overfit_batches is not None and overfit_batches < 1):
         raise ValueError("Epochs and overfit_batches must be positive.")
+    if max_runtime_seconds is not None and (not math.isfinite(max_runtime_seconds) or max_runtime_seconds <= 0):
+        raise ValueError("max_runtime_seconds must be finite and positive")
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     if any((output_dir / name).exists() for name in ("last.pt", "best.pt")) and (
@@ -243,6 +250,9 @@ def train(
         raise ValueError("Output directory already contains checkpoints. Resume that run or choose another output directory.")
     config = json.loads(json.dumps(config))
     settings = config.get("training", {})
+    selection = settings.get("checkpoint_selection", "validation_loss")
+    if selection not in ("validation_loss", "joint_minFDE"):
+        raise ValueError("training.checkpoint_selection must be validation_loss or joint_minFDE")
     seed = int(config.get("seed", settings.get("seed", 42)))
     random.seed(seed)
     np.random.seed(seed)
@@ -269,8 +279,11 @@ def train(
         "batch_size": batch_size, "collate_fn": collate_scenes,
         "num_workers": int(settings.get("num_workers", 0)), "pin_memory": selected.type == "cuda",
     }
-    training_loader = DataLoader(training_data, shuffle=overfit_batches is None, **loader_options)
-    validation_loader = DataLoader(validation_data, shuffle=False, **loader_options)
+    # Sampler order and worker seeds must not consume the model's dropout RNG.
+    sampler_generator = torch.Generator().manual_seed(seed + 1)
+    loader_generator = torch.Generator().manual_seed(seed + 2)
+    validation_generator = torch.Generator().manual_seed(seed + 3)
+    validation_loader = DataLoader(validation_data, shuffle=False, generator=validation_generator, **loader_options)
     model = ForecastModel(config.get("model", config)).to(selected)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=float(settings.get("learning_rate", 3e-4)),
@@ -285,10 +298,18 @@ def train(
     checkpoint_seconds = float(settings.get("checkpoint_seconds", 300))
     if checkpoint_seconds <= 0:
         raise ValueError("training.checkpoint_seconds must be positive.")
+    minimum_free_gib = float(settings.get("minimum_free_gib", 0))
+    if not math.isfinite(minimum_free_gib) or minimum_free_gib < 0:
+        raise ValueError("training.minimum_free_gib must be finite and nonnegative")
     start_epoch, global_step, best_score, history = 0, 0, math.inf, []
     risk_supervision_observations = 0
+    best_selection, progress = None, None
+    training_seconds, examples_seen, objective_totals = 0.0, 0, {}
     if resume is not None:
         saved = load_checkpoint(resume)
+        required = {"optimizer_state_dict", "scheduler_state_dict", "rng_state", "completed_epochs", "global_step"}
+        if not required.issubset(saved):
+            raise ValueError("Resume requires a training last.pt checkpoint, not an inference model bundle.")
         if saved["manifest_hash"] != data_hash:
             raise ValueError("Resume refused: the dataset manifest differs from the checkpoint.")
         if "preprocessing_hash" in saved and saved["preprocessing_hash"] != prep_hash:
@@ -299,6 +320,8 @@ def train(
             raise ValueError("Resume refused: configuration differs from the checkpoint. Use the saved configuration.")
         if saved.get("overfit_batches") != overfit_batches:
             raise ValueError("Resume refused: overfit_batches differs from the checkpoint.")
+        if saved.get("partial_epoch") and saved.get("format_version") == 1:
+            raise ValueError("Resume refused: legacy partial-epoch checkpoints have no committed sample cursor. Resume an epoch-boundary checkpoint.")
         model.load_state_dict(saved["model_state_dict"])
         optimizer.load_state_dict(saved["optimizer_state_dict"])
         scheduler.load_state_dict(saved["scheduler_state_dict"])
@@ -311,18 +334,59 @@ def train(
             scaler.load_state_dict(saved["scaler_state_dict"])
         start_epoch = int(saved["completed_epochs"])
         global_step = int(saved["global_step"])
+        if global_step:
+            # The scheduler's first-step warning flag is not in optimizer state_dict.
+            optimizer._opt_called = True
         best_score = float(saved["best_validation_loss"])
         history = saved.get("history", [])
         risk_supervision_observations = int(saved.get("risk_supervision_observations", 0))
+        best_selection = saved.get("best_selection")
+        if best_selection is None and math.isfinite(best_score):
+            best_selection = {"metric": selection, "key": [best_score], "epoch": start_epoch}
+        statistics = saved.get("statistics", {})
+        examples_seen = int(statistics.get("examples_seen", 0))
+        training_seconds = float(statistics.get("training_seconds", 0))
+        objective_totals = statistics.get("objective_totals", {})
+        if saved.get("format_version") == 2:
+            sampler_generator.set_state(saved["sampler_generator_state"].cpu())
+            loader_generator.set_state(saved["loader_generator_state"].cpu())
+            validation_generator.set_state(saved["validation_generator_state"].cpu())
+            progress = saved.get("training_progress")
+            if saved.get("partial_epoch"):
+                if progress is None or progress["epoch"] != start_epoch:
+                    raise ValueError("Resume refused: partial checkpoint is missing its committed sample order/cursor.")
+                order, cursor = progress["order"], progress["cursor"]
+                if (sorted(order) != list(range(len(training_data))) or not 0 <= cursor <= len(order)
+                        or (cursor != len(order) and cursor % (accumulation * batch_size))):
+                    raise ValueError("Resume refused: partial checkpoint has an invalid committed sample order/cursor.")
         _restore_rng(saved["rng_state"])
         if saved.get("partial_epoch"):
-            print("Resuming the last incomplete epoch from its beginning.", flush=True)
+            print(f"Resuming epoch {start_epoch + 1} after {progress['cursor']} committed examples.", flush=True)
     last_save = time.monotonic()
-    training_seconds, examples_seen = 0.0, 0
+
+    def budget_expired():
+        return max_runtime_seconds is not None and time.monotonic() - started >= max_runtime_seconds
+
+    def save_checkpoint(path, payload):
+        if minimum_free_gib:
+            from adp.research import ensure_space
+
+            def tensor_bytes(value):
+                if isinstance(value, torch.Tensor):
+                    return value.numel()*value.element_size()
+                if isinstance(value, dict):
+                    return sum(tensor_bytes(item) for item in value.values())
+                if isinstance(value, (list, tuple)):
+                    return sum(tensor_bytes(item) for item in value)
+                return 0
+
+            reserve = max(64*1024**2, 2*tensor_bytes(payload) + 1024**2)
+            ensure_space(output_dir, minimum_free_gib, reserve)
+        _atomic_checkpoint(path, payload)
 
     def checkpoint(completed_epochs: int, partial_epoch: bool = False) -> dict:
         return {
-            "format_version": 1, "config": config, "manifest_hash": data_hash,
+            "format_version": 2, "config": config, "manifest_hash": data_hash,
             "preprocessing_hash": prep_hash, "data_audit": data_audit,
             "risk_supervision_observations": risk_supervision_observations,
             "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(),
@@ -330,16 +394,42 @@ def train(
             "scaler_state_dict": scaler.state_dict(), "completed_epochs": completed_epochs,
             "partial_epoch": partial_epoch, "global_step": global_step,
             "best_validation_loss": best_score, "history": history,
+            "best_selection": best_selection, "training_progress": progress if partial_epoch else None,
+            "sampler_generator_state": sampler_generator.get_state(),
+            "loader_generator_state": loader_generator.get_state(),
+            "validation_generator_state": validation_generator.get_state(),
+            "statistics": {"examples_seen": examples_seen, "training_seconds": training_seconds,
+                           "objective_totals": objective_totals},
             "rng_state": _rng_state(), "overfit_batches": overfit_batches,
             "torch_version": str(torch.__version__),
         }
 
+    completed_epochs, budget_exhausted = start_epoch, False
     for epoch in range(start_epoch, epochs):
-        epoch_started = time.monotonic()
         model.train()
         optimizer.zero_grad(set_to_none=True)
-        training_total, training_count = 0.0, 0
-        for batch_index, batch in enumerate(training_loader):
+        if progress is None:
+            order = (torch.randperm(len(training_data), generator=sampler_generator).tolist()
+                     if overfit_batches is None else list(range(len(training_data))))
+            progress = {"epoch": epoch, "order": order, "cursor": 0, "loss_total": 0.0,
+                        "example_count": 0, "component_totals": {},
+                        "loader_epoch_state": loader_generator.get_state()}
+        order, cursor = progress["order"], progress["cursor"]
+        training_total, training_count = progress["loss_total"], progress["example_count"]
+        component_totals = progress["component_totals"]
+        if budget_expired():
+            budget_exhausted = True
+            save_checkpoint(output_dir / "last.pt", checkpoint(epoch, partial_epoch=True))
+            break
+        loader_generator.set_state(progress["loader_epoch_state"].cpu())
+        training_loader = DataLoader(training_data, sampler=order[cursor:], generator=loader_generator, **loader_options)
+        last_tick = time.monotonic()
+        for local_batch_index, batch in enumerate(training_loader):
+            batch_index = cursor // batch_size + local_batch_index
+            if batch_index % accumulation == 0 and budget_expired():
+                budget_exhausted = True
+                save_checkpoint(output_dir / "last.pt", checkpoint(epoch, partial_epoch=True))
+                break
             batch = _move_batch(batch, selected)
             count = int(batch["history"].shape[0])
             with torch.autocast(device_type=selected.type, dtype=torch.float16, enabled=use_amp):
@@ -351,7 +441,7 @@ def train(
             group_start = (batch_index // accumulation) * accumulation
             group_examples = min(accumulation * batch_size, len(training_data) - group_start * batch_size)
             scaler.scale(loss * count / group_examples).backward()
-            boundary = (batch_index + 1) % accumulation == 0 or batch_index + 1 == len(training_loader)
+            boundary = (batch_index + 1) % accumulation == 0 or training_count + count == len(training_data)
             if boundary:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
@@ -365,34 +455,82 @@ def train(
             training_total += float(loss.detach()) * count
             training_count += count
             examples_seen += count
-            if boundary and time.monotonic() - last_save >= checkpoint_seconds:
-                _atomic_checkpoint(output_dir / "last.pt", checkpoint(epoch, partial_epoch=True))
+            for name, value in _objective_values(parts).items():
+                component_totals[name] = component_totals.get(name, 0.0) + value * count
+                objective_totals[name] = objective_totals.get(name, 0.0) + value * count
+            now = time.monotonic()
+            training_seconds += now - last_tick
+            last_tick = now
+            if boundary:
+                progress.update(cursor=training_count, loss_total=training_total, example_count=training_count)
+            budget_exhausted = boundary and budget_expired()
+            if boundary and (time.monotonic() - last_save >= checkpoint_seconds or budget_exhausted):
+                save_checkpoint(output_dir / "last.pt", checkpoint(epoch, partial_epoch=True))
                 last_save = time.monotonic()
-        training_seconds += time.monotonic() - epoch_started
+            if budget_exhausted:
+                break
+        if budget_exhausted:
+            break
         model.eval()
+        if "validation_epoch_state" not in progress:
+            progress["validation_epoch_state"] = validation_generator.get_state()
+            progress["validation_rng_state"] = _rng_state()
+        validation_generator.set_state(progress["validation_epoch_state"].cpu())
+        _restore_rng(progress["validation_rng_state"])
         validation_total, validation_count = 0.0, 0
+        validation_components = {}
+        displacement = {"joint_sum": 0.0, "joint_count": 0, "focal_sum": 0.0, "focal_count": 0}
         with torch.inference_mode():
             for batch in validation_loader:
+                if budget_expired():
+                    budget_exhausted = True
+                    break
                 batch = _move_batch(batch, selected)
                 outputs = model(**model_inputs(batch))
-                loss, _ = _loss_parts(forecast_loss(outputs, batch))
+                loss, parts = _loss_parts(forecast_loss(outputs, batch))
                 if not torch.isfinite(loss):
                     raise RuntimeError(f"Non-finite validation loss at epoch {epoch + 1}.")
                 count = int(batch["history"].shape[0])
                 validation_total += float(loss) * count
                 validation_count += count
+                for name, value in _objective_values(parts).items():
+                    validation_components[name] = validation_components.get(name, 0.0) + value * count
+                for name, value in _validation_displacement(outputs, batch).items():
+                    displacement[name] += value
+                if budget_expired():
+                    budget_exhausted = True
+                    break
+        if budget_exhausted:
+            validation_generator.set_state(progress["validation_epoch_state"].cpu())
+            _restore_rng(progress["validation_rng_state"])
+            save_checkpoint(output_dir / "last.pt", checkpoint(epoch, partial_epoch=True))
+            break
         score = validation_total / validation_count
+        joint_minfde = (displacement["joint_sum"] / displacement["joint_count"]
+                        if displacement["joint_count"] else None)
+        focal_minfde = (displacement["focal_sum"] / displacement["focal_count"]
+                        if displacement["focal_count"] else None)
+        candidate_key = _selection_key(selection, score, joint_minfde, focal_minfde, epoch + 1)
         scheduler.step()
         history.append({
             "epoch": epoch + 1, "train_loss": training_total / training_count,
             "validation_loss": score, "learning_rate": optimizer.param_groups[0]["lr"],
+            "train_objective": {name: value / training_count for name, value in component_totals.items()},
+            "validation_objective": {name: value / validation_count for name, value in validation_components.items()},
+            "validation_joint_minFDE": joint_minfde, "validation_focal_minFDE": focal_minfde,
+            "validation_joint_scenes": displacement["joint_count"],
+            "validation_focal_scenes": displacement["focal_count"],
         })
-        improved = score < best_score
+        improved = best_selection is None or candidate_key < (*best_selection["key"], best_selection["epoch"])
         best_score = min(best_score, score)
-        saved = checkpoint(epoch + 1)
-        _atomic_checkpoint(output_dir / "last.pt", saved)
         if improved:
-            _atomic_checkpoint(output_dir / "best.pt", saved)
+            best_selection = {"metric": selection, "key": list(candidate_key[:-1]), "epoch": epoch + 1}
+        progress = None
+        completed_epochs = epoch + 1
+        saved = checkpoint(epoch + 1)
+        save_checkpoint(output_dir / "last.pt", saved)
+        if improved:
+            save_checkpoint(output_dir / "best.pt", saved)
         _atomic_json(output_dir / "history.json", {"manifest_hash": data_hash, "epochs": history})
         last_save = time.monotonic()
         print(json.dumps(history[-1]), flush=True)
@@ -403,7 +541,9 @@ def train(
     return {
         "checkpoint": str(last_path if last_path.is_file() else Path(resume)),
         "best_checkpoint": str(best_path) if best_path.is_file() else None,
-        "completed_epochs": max(start_epoch, epochs), "best_validation_loss": best_score,
+        "completed_epochs": completed_epochs, "best_validation_loss": best_score if math.isfinite(best_score) else None,
+        "best_selection": best_selection,
+        "budget_exhausted": budget_exhausted,
         "manifest_hash": data_hash, "history": history, "device": str(selected),
         "elapsed_seconds": time.monotonic() - started,
         "training_examples_per_second": examples_seen / training_seconds if training_seconds else None,
@@ -414,7 +554,7 @@ def train(
 
 def calibrate(
     checkpoint: str | Path, cache_dir: str | Path, output_dir: str | Path,
-    device: str = "auto",
+    device: str = "auto", budget_check=None,
 ) -> dict:
     """Fit calibration on its reserved split; never use the evaluation split."""
     from adp.data import CachedDataset, collate_scenes
@@ -440,6 +580,8 @@ def calibrate(
     mode_logits, mode_labels, risk_logits, risk_targets = [], [], [], []
     with torch.inference_mode():
         for batch in loader:
+            if budget_check:
+                budget_check()
             batch = _move_batch(batch, selected)
             outputs = model(**model_inputs(batch))
             targets, eligible = mode_targets(outputs, batch)

@@ -12,4 +12,6 @@ frontend/dist/
 *.egg-info/
 .env
 /Interaction Lab.exe
+/build/
+/dist/
 

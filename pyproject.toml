@@ -17,6 +17,7 @@ dependencies = [
 av2 = ["av2==0.3.6"]
 dev = ["pytest>=8", "httpx>=0.27"]
 desktop = ["pywebview==6.1; sys_platform == 'win32'"]
+release = ["pyinstaller==6.22.3; sys_platform == 'win32'", "pyinstaller-hooks-contrib==2026.8; sys_platform == 'win32'"]
 
 [project.scripts]
 adp = "adp.cli:main"
@@ -26,6 +27,9 @@ adp-app = "adp.desktop:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+adp = ["resources/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

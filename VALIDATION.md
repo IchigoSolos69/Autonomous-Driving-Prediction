@@ -1,4 +1,30 @@
-# Local validation — 17 October 2026
+# Local validation
+
+## Production-beta implementation — 18 October 2026
+
+The beta implementation and the expanded model study are separate deliverables. The reference model below remains the deployed model until fresh held-out evidence passes the promotion gate. No stronger-model result has been measured yet.
+
+Python 3.12 with PyTorch **2.13.0+cu130 / CUDA 13.0** passed actual RTX 5050 Laptop GPU forward/backward, optimizer/RNG continuation, and original-checkpoint CPU/GPU compatibility checks. Exact runtime locks are under `requirements/`. The qualified runtime is separate from the original 2.11 development environment. Evidence is in `artifacts/production/runtime-cu130.json` and `artifacts/packaging/qualification-cu130-gpu.json`.
+
+The final production-runtime source suite passed **103 tests plus four subtests** in 28.81 seconds, and the frontend passed **18 tests** and its production build. This includes restoration of the scoped Windows sleep state and inference export of format-2 training checkpoints. Source checks exercise resumable committed batches, scenario provenance, truncated-report rejection, storage/GPU-budget guards, imports/cancellation, native request tokens, calibration evidence, corrupt bundles, installer staging and rollback. One existing Starlette/httpx test-client deprecation warning remains. Windows CI is configured but has not been run remotely.
+
+The exact release dependency set and base PyTorch 2.13.0 were checked against the advisory database with no known vulnerabilities reported at scan time; see `artifacts/production/dependency-audit.json`. This supersedes the old runtime's advisory status for the new releases only.
+
+The immutable expanded manifest contains 40,000 training and 12,000 fresh validation scenarios, with 2,000 previously inspected validation IDs excluded. A **1,000-scenario, training-only pilot** completed. The final configuration-bound profile measured **43.59 examples/s**, 178,998,784 bytes peak PyTorch allocated and 201,326,592 bytes reserved memory. Its 465,818,342 raw/cache bytes project to **22.56 GiB** for the selected study. Pilot eligibility was 44 actor labels, including five positives, across eight eligible scenes. No selection, calibration or evaluation scenes were used for pilot training.
+
+The earlier pilot projected the 20-epoch study beyond 40 GPU-hours, so the uniform schedule was frozen at **15 epochs** before screening. Throughput is a projection, not a completed study. Acquisition pauses when projected space would breach the 8 GiB reserve; calibration/evaluation share the 40-hour GPU ledger. The pipeline prevents idle Windows system sleep only while running and restores the prior thread state afterward; it does not change power-plan settings or keep the display on.
+
+Final CPU and NVIDIA installers both passed dedicated-folder install, bundled-runtime trained-demo inference, owned-service shutdown, corrected attribution and uninstall/data-preservation checks. Their common source hash is `9301a5edaeed0d8e6e7b3c13846e8f9d49f1c27650e46e42f6607865b13dcfef`; exact hashes/timings are in `artifacts/packaging/final/validation.json` and the `D:\InteractionLab\release-*` receipts. CPU verification took 4.88 seconds / 394 MB peak process working set; CUDA verification took 17.07 seconds / 1.63 GB. These are verification durations, not native UI startup or VRAM. These checks do not establish clean-machine acceptance: a clean Windows VM without Python/Node, physical CPU-only hardware, native-dialog interaction, offline restart, and the full installed upgrade workflow remain unverified. Native UI-control approval timed out; no successful dialog interaction is inferred from headless tests.
+
+Generated-only build cleanup left 32.21 GiB free on D:. The resumable expanded-study pipeline was launched at 23:37 IST on 18 October and reached its acquisition phase. Live phase, process and log paths are under `D:\InteractionLab\study-v1\pipeline_status.json` and `pipeline-process.json`. This records a running acquisition, not completed expanded training or evaluation.
+
+A real pilot AV2 parquet/map pair was imported into a separate Unicode-path test cache and then forecast through the trained CUDA service. Source SHA-256 hashes were unchanged, the import appeared in the scenario API, and its six-world response retained experimental risk labels. This exercised import/service integration rather than the native folder dialog; `artifacts/production/real-import.json` records the check.
+
+The same imported scenario passed trained/constant-velocity/position-noise comparison and all four service export formats: prediction JSON, comparison CSV, PNG and diagnostics ZIP. The PNG was visually checked. Output hashes are in `artifacts/production/real-exports.json`; save destinations were explicit test paths, so this does not establish native save-dialog acceptance. The bundled demo's copyright/terms attribution was also corrected and its initial/reused-cache regression passed.
+
+Frozen editions bundle Python, dependencies, frontend, reference weights and real demonstration scenes. The project-root executable described below remains the older workspace launcher. New writable settings, logs, imported datasets and models use `%LOCALAPPDATA%\Interaction Lab`. See [production instructions](PRODUCTION.md) and [packaging instructions](scripts/PACKAGING.md) for current entry points and acceptance limits.
+
+## Reference prototype — 17 October 2026
 
 This is an implemented research prototype with a preliminary three-epoch experiment, not a validated driving-safety system.
 

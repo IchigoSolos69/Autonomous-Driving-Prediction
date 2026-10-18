@@ -1,0 +1,50 @@
+name: Windows checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install pinned CPU runtime and test tools
+        run: |
+          python -m pip install -r requirements/runtime-cpu.lock.txt pytest==9.1.1 httpx==0.28.1
+          python -m pip install --no-deps --no-build-isolation -e .
+          python -m pip check
+      - name: Python tests and runtime continuation
+        run: |
+          python -m pytest --basetemp .pytest-tmp-ci -q
+          python scripts/qualify-runtime.py --expected-torch 2.13.0+cpu --device cpu --output artifacts/ci-runtime.json
+      - name: Audit pinned runtime versions
+        run: |
+          python -m pip install --target .audit-tools pip-audit==2.10.1
+          Copy-Item requirements/runtime-common.lock.txt audit-requirements.txt
+          Add-Content audit-requirements.txt 'torch==2.13.0'
+          $env:PYTHONPATH = '.audit-tools'
+          python -m pip_audit -r audit-requirements.txt --no-deps --disable-pip --progress-spinner off -f json -o artifacts/dependency-audit.json
+      - name: Frontend tests and production build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npm audit --audit-level=high
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-check-evidence
+          path: |
+            artifacts/ci-runtime.json
+            artifacts/dependency-audit.json

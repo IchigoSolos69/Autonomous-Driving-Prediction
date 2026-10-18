@@ -4,7 +4,7 @@ A Windows desktop research application for joint motion forecasting, proximity-r
 
 The model combines a temporal Transformer, interaction graph, vector-map attention, and six shared probabilistic scene futures. A separate head estimates whether another retained dynamic actor will come within 3 metres during the following six seconds. The native application window displays the same observed inputs and stress interventions used for inference.
 
-The completed local experiment, measured results, restart command and limitations are recorded in [VALIDATION.md](VALIDATION.md). The tested Windows dependency snapshot is `requirements-windows.lock.txt`; install it with the official CUDA wheel index specified in its header when reproducing this exact environment.
+The original local experiment and its limitations are recorded in [VALIDATION.md](VALIDATION.md). The production beta workflow, separate CPU/NVIDIA installers, and larger model study are described in [PRODUCTION.md](PRODUCTION.md). The original `.venv` and `requirements-windows.lock.txt` remain available to reproduce that reference experiment; the isolated production runtime uses the exact PyTorch 2.13 locks under `requirements/`.
 
 ## Quick start on Windows
 
@@ -32,7 +32,7 @@ For the full local experiment already present in this workspace, double-click **
 
 Without explicit checkpoint options, `adp desktop` uses `artifacts/experiment/best.pt`, then `artifacts/run/best.pt`, and loads the accompanying `calibration.json` when present. If no weights exist, the application labels the constant-velocity baseline. `--baseline` forces that baseline; explicit `--checkpoint` and `--calibration` select a particular trained run. Paths resolve relative to `--project-dir` (the source project by default), rather than the shortcut's working directory.
 
-The application starts its own loopback service on an available port and closes it with the window. Startup errors appear in the application; diagnostic logs are in `artifacts/desktop/app.log`. Close the application before rebuilding its executable. Rebuild the interface after frontend changes, then restart the application.
+The application starts its own loopback service on an available port and closes it with the window. Startup errors appear in the application; current diagnostic logs and settings are in `%LOCALAPPDATA%\Interaction Lab`. The native window includes AV2 folder imports, model/data settings, JSON/CSV/PNG exports and explicit diagnostics export. Close the application before rebuilding its executable. Rebuild the interface after frontend changes, then restart the application.
 
 The HTTP service remains available for API use and development: run `.\.venv\Scripts\python.exe -m adp serve`, then visit `http://127.0.0.1:8000` or `/docs`. For frontend development, run `npm.cmd run dev` inside `frontend`; Vite proxies `/api` to that service on port 8000.
 
@@ -70,7 +70,7 @@ Preprocessing uses four CPU workers by default (`--workers 1` disables multiproc
 .\.venv\Scripts\python.exe -m adp train --resume artifacts/run/last.pt --epochs 40
 ```
 
-Five-minute checkpoints occur at optimizer boundaries. Resuming an incomplete epoch repeats that epoch from the beginning; this preserves progress but is not bit-identical sample replay. Training throughput and peak CUDA memory are measured by the runtime.
+Five-minute checkpoints occur at optimizer boundaries. Format-2 checkpoints preserve the committed sample cursor, sampler order, independent loader RNGs, objective totals and training state, so resumed epochs do not replay committed samples. Exact CPU continuation is tested; cross-device floating-point results need not be identical. Legacy epoch-boundary training checkpoints remain supported; legacy partial epochs and inference-only bundles are refused for resume. Training throughput and peak CUDA memory are measured by the runtime.
 
 ## Free cloud training
 
