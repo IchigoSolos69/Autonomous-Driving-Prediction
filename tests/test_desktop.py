@@ -11,6 +11,16 @@ from fastapi import FastAPI
 from adp.desktop import LocalBackend, add_arguments, resolve_paths, status_page
 
 
+def test_training_screen_startup_arguments_keep_roots_local():
+    from pathlib import Path
+    parser = argparse.ArgumentParser()
+    add_arguments(parser)
+    args = parser.parse_args(["--training", "--study-root", "D:/Research/study", "--direction-root", "D:/Research/direction"])
+    assert args.training
+    assert args.study_root == Path("D:/Research/study")
+    assert args.direction_root == Path("D:/Research/direction")
+
+
 def options(root, *arguments):
     parser = argparse.ArgumentParser()
     add_arguments(parser)
@@ -107,6 +117,9 @@ def test_legacy_renderer_shows_install_guidance_before_loading_model(tmp_path, m
     from adp.desktop import run
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-appdata"))
     monkeypatch.setattr("adp.desktop.SingleInstance.acquire", lambda self: True)
+    if sys.platform == "win32":
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.user32, "MessageBoxW", lambda *args: pytest.fail(f"Unexpected native startup failure: {args[1]}"))
 
     class Hook:
         def __iadd__(self, callback):

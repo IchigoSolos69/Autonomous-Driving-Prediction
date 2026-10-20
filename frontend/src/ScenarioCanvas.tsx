@@ -9,6 +9,7 @@ interface Props {
   original: Prediction | null;
   step: number;
   mode: number;
+  originalMode?: number;
   selected: string;
   showReference: boolean;
   showAllModes: boolean;
@@ -107,7 +108,7 @@ export default function ScenarioCanvas(props: Props) {
 
     if (original) original.actor_ids.forEach((id, index) => {
       const actor = original.scenario.actors.find((candidate) => candidate.id === id);
-      line([actor ? lastPosition(actor) : null, ...(original.trajectories[mode]?.[index] ?? [])], '#bdc8d1', id === selected ? 2 : 1, [5, 6], id === selected ? 0.85 : 0.27);
+      line([actor ? lastPosition(actor) : null, ...(original.trajectories[props.originalMode ?? mode]?.[index] ?? [])], '#bdc8d1', id === selected ? 2 : 1, [5, 6], id === selected ? 0.85 : 0.27);
     });
 
     if (prediction) prediction.actor_ids.forEach((id, index) => {
@@ -159,7 +160,7 @@ export default function ScenarioCanvas(props: Props) {
     const scaleWidth = scaleMeters * camera.zoom;
     ctx.strokeStyle = '#acbac6'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(25, size.height - 28); ctx.lineTo(25 + scaleWidth, size.height - 28); ctx.stroke();
     ctx.fillStyle = '#acbac6'; ctx.font = '11px Segoe UI, sans-serif'; ctx.fillText(`${scaleMeters} m`, 25, size.height - 38);
-  }, [scenario, prediction, original, step, mode, selected, showReference, showAllModes, camera, size]);
+  }, [scenario, prediction, original, step, mode, props.originalMode, selected, showReference, showAllModes, camera, size]);
 
   const handleDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.focus(); event.currentTarget.setPointerCapture(event.pointerId);

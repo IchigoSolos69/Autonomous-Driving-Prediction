@@ -167,7 +167,15 @@ def _atomic_checkpoint(path: Path, checkpoint: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     try:
         torch.save(_portable(checkpoint), temporary)
-        os.replace(temporary, path)
+        # Windows scanners can briefly hold the destination after a checkpoint read.
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(.05 * (attempt + 1))
     finally:
         temporary.unlink(missing_ok=True)
 

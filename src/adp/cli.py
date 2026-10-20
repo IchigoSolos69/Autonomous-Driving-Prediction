@@ -166,6 +166,18 @@ def main():
     study.add_argument("--device", default="cuda")
     study.add_argument("--workers", type=int, default=4)
     study.add_argument("--reference-checkpoint", default="artifacts/experiment/best.pt")
+    failures = sub.add_parser("analyze-failures", help="Build selection-only development reports and recorded failure replays")
+    failures.add_argument("--study-root", type=Path, required=True)
+    failures.add_argument("--output-dir", type=Path, required=True)
+    direction = sub.add_parser("direction-study", help="Run the separate 12 GPU-hour controlled lane-tangent experiment")
+    direction.add_argument("--reference-root", type=Path, required=True)
+    direction.add_argument("--root", type=Path, default=Path("D:/InteractionLab/direction-study-v1"))
+    direction.add_argument("--device", default="cuda")
+    followup = sub.add_parser("direction-followup", help="Wait for the current study, then build failure reports and run the controlled experiment once")
+    followup.add_argument("--reference-root", type=Path, required=True)
+    followup.add_argument("--root", type=Path, default=Path("D:/InteractionLab/direction-study-v1"))
+    followup.add_argument("--poll-seconds", type=float, default=30)
+    followup.add_argument("--device", default="cuda")
     bundle = sub.add_parser("export-model", help="Export a bounded, versioned inference-only model bundle")
     bundle.add_argument("--checkpoint", required=True)
     bundle.add_argument("--cache-dir", default="data/cache")
@@ -190,6 +202,8 @@ def main():
     serve.add_argument("--device", default="auto")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
+    serve.add_argument("--study-root", type=Path)
+    serve.add_argument("--direction-root", type=Path)
     args = parser.parse_args()
     try:
         if args.command == "desktop":
@@ -229,6 +243,15 @@ def main():
             metadata = export_model(args.checkpoint, args.cache_dir, args.output_dir, args.calibration, args.model_card, args.evaluation)
             result = {"bundle_id": metadata["bundle_id"], "output_dir": args.output_dir,
                       "evaluation_supplied": metadata.get("evaluation") is not None}
+        elif args.command == "analyze-failures":
+            from adp.analysis import analyze_failures
+            result = analyze_failures(args.study_root, args.output_dir)
+        elif args.command == "direction-study":
+            from adp.direction import run_direction_study
+            result = run_direction_study(args.reference_root, args.root, args.device)
+        elif args.command == "direction-followup":
+            from adp.followup import run_direction_followup
+            result = run_direction_followup(args.reference_root, args.root, poll_seconds=args.poll_seconds, device=args.device)
         elif args.command == "benchmark-protocol":
             from adp.protocol import create_protocol
             protocol = create_protocol(args.cache_dir, args.output, args.provenance_manifest)
@@ -272,7 +295,9 @@ def main():
         else:
             import uvicorn
             from adp.api import create_app
-            uvicorn.run(create_app(args.cache_dir, args.checkpoint, args.calibration, args.device), host=args.host, port=args.port)
+            from adp.training_status import TrainingStatus
+            progress = TrainingStatus(args.study_root or Path("D:/InteractionLab/study-v1"), args.direction_root or Path("D:/InteractionLab/direction-study-v1")) if args.study_root or args.direction_root else None
+            uvicorn.run(create_app(args.cache_dir, args.checkpoint, args.calibration, args.device, training_status=progress), host=args.host, port=args.port)
             return
     except (ValueError, FileNotFoundError, RuntimeError, ImportError) as error:
         parser.exit(1, f"{args.command}: {error}\n")

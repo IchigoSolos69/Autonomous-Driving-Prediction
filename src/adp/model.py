@@ -15,6 +15,18 @@ def model_inputs(batch):
     return {key: batch[key] for key in INPUT_KEYS}
 
 
+def lane_tangents(points, features, mask):
+    """Signed unit travel directions; preprocessing preserves lane point order."""
+    differences = torch.zeros_like(points)
+    if points.shape[-2] > 1:
+        differences[..., 0, :] = points[..., 1, :] - points[..., 0, :]
+        differences[..., -1, :] = points[..., -1, :] - points[..., -2, :]
+        differences[..., 1:-1, :] = points[..., 2:, :] - points[..., :-2, :]
+    norm = torch.linalg.vector_norm(differences, dim=-1, keepdim=True)
+    valid = mask & (features[..., 0] > .5) & (features[..., 1] < .5)
+    return torch.where(valid[..., None, None] & (norm > 1e-6), differences / norm.clamp_min(1e-6), 0)
+
+
 class InteractionLayer(nn.Module):
     def __init__(self, width, heads):
         super().__init__()
@@ -50,6 +62,9 @@ class ForecastModel(nn.Module):
         super().__init__()
         self.config = dict(config or {})
         c = self.config
+        self.map_point_encoding = c.get("map_point_encoding", "xy")
+        if self.map_point_encoding not in ("xy", "xy_zero_tangent", "xy_tangent"):
+            raise ValueError("map_point_encoding must be xy, xy_zero_tangent or xy_tangent")
         self.shared_world_ce_weight = float(c.get("shared_world_ce_weight", 0))
         if not math.isfinite(self.shared_world_ce_weight) or self.shared_world_ce_weight < 0:
             raise ValueError("shared_world_ce_weight must be finite and nonnegative")
@@ -61,7 +76,7 @@ class ForecastModel(nn.Module):
         layer = nn.TransformerEncoderLayer(width, heads, width*2, dropout=0.1, batch_first=True, norm_first=True)
         self.temporal = nn.TransformerEncoder(layer, c.get("temporal_layers", 2), enable_nested_tensor=False)
         self.graph = nn.ModuleList([InteractionLayer(width, heads) for _ in range(c.get("graph_layers", 2))])
-        self.map_encoder = nn.Sequential(nn.Linear(6, width), nn.GELU(), nn.Linear(width, width))
+        self.map_encoder = nn.Sequential(nn.Linear(6 if self.map_point_encoding == "xy" else 8, width), nn.GELU(), nn.Linear(width, width))
         self.map_attention = nn.MultiheadAttention(width, heads, batch_first=True)
         self.map_norm = nn.LayerNorm(width)
         self.world_queries = nn.Parameter(torch.randn(self.modes, width)*0.1)
@@ -85,6 +100,9 @@ class ForecastModel(nn.Module):
         nodes = nodes*actor_mask[..., None]
         if self.config.get("use_map", True):
             map_input = torch.cat([map_points/100, map_features[:, :, None].expand(-1, -1, 20, -1)], dim=-1)
+            if self.map_point_encoding != "xy":
+                tangents = lane_tangents(map_points, map_features, map_mask) if self.map_point_encoding == "xy_tangent" else torch.zeros_like(map_points)
+                map_input = torch.cat([map_input, tangents], dim=-1)
             map_tokens = self.map_encoder(map_input).amax(2)
             safe_map_mask = map_mask.clone()
             safe_map_mask[:, 0] |= ~safe_map_mask.any(-1)

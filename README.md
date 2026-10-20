@@ -6,6 +6,8 @@ The model combines a temporal Transformer, interaction graph, vector-map attenti
 
 The original local experiment and its limitations are recorded in [VALIDATION.md](VALIDATION.md). The production beta workflow, separate CPU/NVIDIA installers, and larger model study are described in [PRODUCTION.md](PRODUCTION.md). The original `.venv` and `requirements-windows.lock.txt` remain available to reproduce that reference experiment; the isolated production runtime uses the exact PyTorch 2.13 locks under `requirements/`.
 
+The desktop **Failures** workspace and separate 12 GPU-hour lane-direction development experiment are described in [FAILURE_ANALYSIS.md](FAILURE_ANALYSIS.md). They use recorded, selection-only evidence and preserve the current study's running source.
+
 ## Quick start on Windows
 
 Requires Python 3.12, Node 22.12+ or 24 for building the interface, the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/), and several GB for CUDA PyTorch. Installation stays inside `.venv`; setup includes the desktop dependencies. The setup script can discover the bundled Codex Python runtime, or accept `-Python C:\path\to\python.exe`.
@@ -33,6 +35,10 @@ For the full local experiment already present in this workspace, double-click **
 Without explicit checkpoint options, `adp desktop` uses `artifacts/experiment/best.pt`, then `artifacts/run/best.pt`, and loads the accompanying `calibration.json` when present. If no weights exist, the application labels the constant-velocity baseline. `--baseline` forces that baseline; explicit `--checkpoint` and `--calibration` select a particular trained run. Paths resolve relative to `--project-dir` (the source project by default), rather than the shortcut's working directory.
 
 The application starts its own loopback service on an available port and closes it with the window. Startup errors appear in the application; current diagnostic logs and settings are in `%LOCALAPPDATA%\Interaction Lab`. The native window includes AV2 folder imports, model/data settings, JSON/CSV/PNG exports and explicit diagnostics export. Close the application before rebuilding its executable. Rebuild the interface after frontend changes, then restart the application.
+
+Select **Training** in the header to inspect the current study and queued lane-direction experiment. The screen shows all six runs, saved epoch and batch progress, learning curves, throughput, compute reservations and free storage. It polls every five seconds; committed progress advances when the runner saves a checkpoint, normally every five minutes or at an epoch boundary. It does not start, stop or change training. GPU-hour charges include conservative reservations and are not an exact active-time measurement; no completion-time estimate is invented.
+
+Open directly with `adp desktop --training`. Study directories default to `D:\InteractionLab\study-v1` and `D:\InteractionLab\direction-study-v1`; override them with `--study-root` and `--direction-root`. The read-only `GET /api/training` endpoint accepts no filesystem arguments. For a development service, configure its roots using `adp serve --study-root PATH --direction-root PATH`. The monitor works even when no forecasting weights or scenarios are configured.
 
 The HTTP service remains available for API use and development: run `.\.venv\Scripts\python.exe -m adp serve`, then visit `http://127.0.0.1:8000` or `/docs`. For frontend development, run `npm.cmd run dev` inside `frontend`; Vite proxies `/api` to that service on port 8000.
 

@@ -8,6 +8,7 @@ export interface DesktopApi {
   choose_import_directory(): Promise<{ source_token: string; display_name: string } | null>;
   choose_data_directory(): Promise<{ data_root: string; restart_required: true } | null>;
   choose_model_bundle(archive?: boolean): Promise<{ bundle_id: string; restart_required: true } | null>;
+  choose_analysis_directory?(): Promise<AnalysisSummary | null>;
 }
 declare global { interface Window { pywebview?: { api?: DesktopApi } } }
 export interface ImportJob {
@@ -86,3 +87,55 @@ export interface Prediction {
   stress: Stress | null;
   elapsed_ms: number;
 }
+export interface AnalysisCounts { actors: number; scenarios: number; cases: number; small_sample: boolean }
+export type AnalysisMetrics = Record<string, Record<string, number | null>>;
+export interface AnalysisSummary { id: string; title: string; split: string; development_only: boolean; counts: AnalysisCounts }
+export interface AnalysisActor { actor_id: string; actor_type: string; role: string; speed_bin: string; turn_bin: string; density_bin: string; history_bin: string }
+export interface AnalysisCaseSummary { scenario_id: string; city: string; focal_type: string; actor_count: number; focal_minFDE: number | null; jointFDE: number | null; delta_jointFDE?: number | null; actors: AnalysisActor[] }
+export interface AnalysisDetail extends AnalysisSummary {
+  metrics: AnalysisMetrics;
+  slices: { dimension: string; value: string; actor_count: number; scenario_count: number; small_sample: boolean; metrics: AnalysisMetrics }[];
+  cases: AnalysisCaseSummary[];
+  model_labels: string[];
+  provenance: Record<string, unknown>;
+  joint_metric_scope?: string;
+}
+export interface RecordedPrediction extends Prediction { analysis_label: string; analysis_seed: number | null }
+export interface AnalysisCase { analysis_id: string; scenario: Scenario; predictions: RecordedPrediction[] }
+export interface TrainingHistory {
+  epoch: number; train_loss: number | null; validation_loss: number | null;
+  joint_minFDE: number | null; focal_minFDE: number | null;
+  train_objective?: Record<string, number | null> | null;
+  validation_objective?: Record<string, number | null> | null;
+}
+export interface TrainingRun {
+  id: string; name: string; configuration: string | null; seed: number;
+  state: 'pending' | 'running' | 'completed' | 'stopped' | 'unavailable';
+  planned_epochs: number | null; completed_epochs: number; epoch_number: number | null;
+  committed_examples: number | null; training_examples: number | null; committed_fraction: number | null;
+  committed_batches: number | null; batches_per_epoch: number | null;
+  stage: 'train' | 'validation_pending' | 'epoch_boundary' | 'pending' | 'completed';
+  global_step: number | null; examples_per_second: number | null; peak_vram_mib: number | null;
+  checkpoint: { updated_at: string | null; age_seconds: number | null; stale: boolean };
+  history: TrainingHistory[]; issue: string | null;
+}
+export interface TrainingStudy {
+  id: 'original' | 'direction'; title: string;
+  status: 'running' | 'waiting' | 'stopped' | 'completed' | 'not_started' | 'unavailable';
+  phase: string; message: string | null; issues: string[]; current_run_id: string | null;
+  progress: { planned_epochs: number | null; completed_epochs: number; committed_epoch_fraction: number; overall_fraction: number | null; completed_runs: number; total_runs: number };
+  budget: { limit_hours: number; charged_hours: number | null; reserved_hours: number | null; remaining_hours: number | null; note: string };
+  storage: { free_gib: number | null; minimum_free_gib: number; below_reserve: boolean | null };
+  runs: TrainingRun[];
+}
+export interface ComputeHostStatus {
+  id: string; label?: string | null; status?: string | null; phase?: string | null;
+  message?: string | null; gpu?: string | null; updated_at?: string | null;
+  freshness?: { age_seconds: number | null; stale: boolean };
+  stale?: boolean; last_observed_status?: string | null;
+  connection?: { status: string; phase?: string | null; message?: string | null; scope?: string | null; checked_at?: string | null; saved_run_status?: string | null } | null;
+  training?: { completed_epochs: number | null; planned_epochs: number | null; committed_examples: number | null; total_examples: number | null; examples_per_second: number | null } | null;
+  transfer?: { status: string | null; verified_at: string | null; local_path: string | null } | null;
+  cleanup?: { status: string | null; message: string | null } | null;
+}
+export interface TrainingSnapshot { version: 1; generated_at: string | null; poll_seconds: number; studies: TrainingStudy[]; message?: string; compute_hosts?: ComputeHostStatus[] }

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 import torch
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -102,6 +102,9 @@ def _actor_errors(record):
                 fde = float(distances[:, -1].min())
         rows.append({"prediction_id": record["prediction_id"], "scenario_id": record["scenario_id"],
                      "model": record["model"]["kind"], "stress": (record.get("stress") or {}).get("kind", "original"),
+                     "analysis_id": record.get("analysis_id"), "recorded": record.get("recorded", False),
+                     "analysis_label": record.get("analysis_label"), "analysis_seed": record.get("analysis_seed"),
+                     "development_only": record.get("development_only", False),
                      "actor_id": actor["id"], "actor_type": actor["type"], "reference_steps": int(mask.sum()),
                      "minADE_available_m": ade, "minFDE_at_6s_m": fde,
                      "raw_risk": record["risk"]["raw"][i],
@@ -153,7 +156,11 @@ def export_record(target, kind, records, health, state_dir=None):
                     axis.plot(*path.T, alpha=.25 + .7 * probability, label=f"World {mode + 1}: {probability:.1%}")
                 error = _actor_errors(record)[index]
                 ade = "unavailable" if error["minADE_available_m"] is None else f"{error['minADE_available_m']:.2f} m"
-                axis.set(title=f"{record['model']['kind']} · {(record.get('stress') or {}).get('kind', 'original')}\nFocal minADE over available references: {ade}",
+                label = record.get("analysis_label", record["model"]["kind"])
+                if record.get("analysis_seed") is not None:
+                    label += f" · seed {record['analysis_seed']}"
+                context = "recorded development result" if record.get("development_only") else (record.get("stress") or {}).get("kind", "original")
+                axis.set(title=f"{label} · {context}\nFocal minADE over available references: {ade}",
                          xlabel="Local x (m)", ylabel="Local y (m)")
                 axis.axis("equal")
                 axis.legend(fontsize=7)
@@ -175,7 +182,7 @@ def export_record(target, kind, records, health, state_dir=None):
 
 def create_app(cache_dir="data/cache", checkpoint=None, calibration=None, device="auto", frontend_dir="frontend/dist",
                import_manager=None, desktop_token=None, native_dialogs=None, state_dir=None,
-               bundle_metadata=None, evaluation=None, reports_dir=None, data_root=None):
+               bundle_metadata=None, evaluation=None, reports_dir=None, data_root=None, analysis_store=None, training_status=None):
     app = FastAPI(title="Autonomous Driving Prediction", version="0.1.0")
     cache_dir = Path(cache_dir)
     selected_device = resolve_device(device)
@@ -276,6 +283,18 @@ def create_app(cache_dir="data/cache", checkpoint=None, calibration=None, device
                 "risk_calibration_status": risk_calibration_status(calibration_data, evaluation),
                 "risk_definition": "another retained dynamic actor within 3m during 6s",
                 "baseline": "constant_velocity; heuristic risk is uncalibrated"}
+
+    @app.get("/api/training")
+    def training_progress(request: Request):
+        if request.query_params:
+            raise HTTPException(422, "Training roots are configured at application startup; this endpoint accepts no paths or filters.")
+        if training_status is None:
+            return {"version": 1, "generated_at": None, "poll_seconds": 5, "studies": [],
+                    "message": "Training monitoring is not configured. Open the desktop application or start the service with --study-root and --direction-root."}
+        try:
+            return training_status.snapshot()
+        except (OSError, ValueError) as error:
+            raise HTTPException(503, "Training records are temporarily unavailable. Retry after the next checkpoint is saved.") from error
 
     @app.get("/api/scenarios")
     def scenarios():
@@ -396,6 +415,46 @@ def create_app(cache_dir="data/cache", checkpoint=None, calibration=None, device
                     evaluation and calibration_data and evaluation.get("checkpoint_sha256") in
                     {calibration_data.get("checkpoint_sha256"), calibration_data.get("source_checkpoint_sha256")} - {None})),
                 "experimental": risk_calibration_status(calibration_data, evaluation) != "calibrated_proxy"}
+
+    @app.get("/api/analyses")
+    def analyses():
+        return {"analyses": analysis_store.list() if analysis_store is not None else []}
+
+    @app.get("/api/analyses/{analysis_id}")
+    def analysis_detail(analysis_id: str, request: Request):
+        if analysis_store is None:
+            raise HTTPException(404, "No saved analyses are available. Load an analysis folder in the desktop application.")
+        allowed = {"city", "actor_type", "role", "speed_bin", "turn_bin", "density_bin", "history_bin"}
+        if any(key not in allowed or len(request.query_params.getlist(key)) != 1 for key in request.query_params):
+            raise HTTPException(422, "Use one value per supported failure-analysis filter.")
+        try:
+            return analysis_store.detail(analysis_id, {key: value for key, value in request.query_params.items() if value})
+        except KeyError as error:
+            raise HTTPException(404, "Saved analysis not found. Load its analysis folder again.") from error
+        except (ValueError, OSError) as error:
+            raise HTTPException(422, f"Unable to read this analysis: {error}") from error
+
+    @app.get("/api/analyses/{analysis_id}/cases/{scenario_id}")
+    def analysis_case(analysis_id: str, scenario_id: str):
+        if analysis_store is None:
+            raise HTTPException(404, "No saved analysis has been loaded.")
+        try:
+            from copy import deepcopy
+            payload = deepcopy(analysis_store.case(analysis_id, scenario_id))
+        except KeyError as error:
+            raise HTTPException(404, "Recorded case not found in this analysis.") from error
+        except (ValueError, OSError) as error:
+            raise HTTPException(422, f"Unable to open this recorded case: {error}") from error
+        # Recorded results never enter the live inference path or replace its checkpoint.
+        with record_lock:
+            for prediction in payload["predictions"]:
+                prediction["prediction_id"] = uuid.uuid4().hex
+                prediction["analysis_id"] = analysis_id
+                prediction["development_only"] = True
+                records[prediction["prediction_id"]] = prediction
+            while len(records) > 8:
+                records.popitem(last=False)
+        return payload
 
     @app.get("/api/reports/{name}.png")
     def report_image(name: Literal["evaluation", "training"]):

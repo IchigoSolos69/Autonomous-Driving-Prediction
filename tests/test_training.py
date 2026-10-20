@@ -121,6 +121,30 @@ class CheckpointTests(unittest.TestCase):
             self.assertEqual(load_checkpoint(path)["step"], 1)
             self.assertFalse(path.with_suffix(".pt.tmp").exists())
 
+    def test_checkpoint_retries_transient_destination_lock(self):
+        import os
+        from adp.training import _atomic_checkpoint, load_checkpoint
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "last.pt"
+            _atomic_checkpoint(path, {"format_version": 1, "step": 1})
+            replace = os.replace
+            attempts = []
+            def locked_then_replace(source, destination):
+                attempts.append(1)
+                if len(attempts) < 3:
+                    raise PermissionError("transient Windows lock")
+                return replace(source, destination)
+            with patch("adp.training.os.replace", side_effect=locked_then_replace), patch("adp.training.time.sleep") as sleep:
+                _atomic_checkpoint(path, {"format_version": 1, "step": 2})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(load_checkpoint(path)["step"], 2)
+            with patch("adp.training.os.replace", side_effect=PermissionError("persistent lock")), patch("adp.training.time.sleep"):
+                with self.assertRaises(PermissionError):
+                    _atomic_checkpoint(path, {"format_version": 1, "step": 3})
+            self.assertEqual(load_checkpoint(path)["step"], 2)
+            self.assertFalse(path.with_suffix(".pt.tmp").exists())
+
     def test_manifest_hash_changes_when_manifest_changes(self):
         from adp.training import manifest_hash
 

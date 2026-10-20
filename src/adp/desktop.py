@@ -26,6 +26,9 @@ def add_arguments(parser):
     parser.add_argument("--baseline", action="store_true", help="Use the explicitly labelled constant-velocity baseline")
     parser.add_argument("--data-root", type=Path, help="Writable imported data/model storage; logs and settings remain in Local AppData")
     parser.add_argument("--model-bundle", type=Path, help="Validated inference bundle directory")
+    parser.add_argument("--study-root", type=Path, default=Path("D:/InteractionLab/study-v1"), help="Read-only original study progress directory")
+    parser.add_argument("--direction-root", type=Path, default=Path("D:/InteractionLab/direction-study-v1"), help="Read-only lane-direction study progress directory")
+    parser.add_argument("--training", action="store_true", help="Open the Training screen at startup")
 
 
 def application_state_dir():
@@ -141,9 +144,10 @@ class SingleInstance:
 
 
 class DesktopBridge:
-    def __init__(self, state_dir, data_root, settings, token, imports):
+    def __init__(self, state_dir, data_root, settings, token, imports, analyses=None):
         self._state_dir, self._data_root = Path(state_dir), Path(data_root)
         self._settings, self._token, self._imports = settings, token, imports
+        self._analyses = analyses
         self._window = None
         self._dialog_lock = threading.Lock()
 
@@ -161,6 +165,15 @@ class DesktopBridge:
         import webview
         directory = self._choose(webview.FileDialog.FOLDER)
         return self._imports.grant_directory(directory) if directory else None
+
+    def choose_analysis_directory(self):
+        import webview
+        directory = self._choose(webview.FileDialog.FOLDER)
+        if not directory:
+            return None
+        if self._analyses is None:
+            raise RuntimeError("Saved analysis is unavailable. Restart the updated application.")
+        return self._analyses.install(directory)
 
     def choose_data_directory(self):
         import webview
@@ -301,9 +314,14 @@ def run(args):
         if not getattr(args, "model_bundle", None) and settings.get("model_bundle") and not args.baseline:
             args.model_bundle = Path(settings["model_bundle"])
         from adp.imports import ImportManager
+        from adp.analysis import AnalysisStore
+        from adp.training_status import TrainingStatus
         imports = ImportManager(data_root / "imports")
+        analyses = AnalysisStore(data_root / "analyses")
+        training_status = TrainingStatus(getattr(args, "study_root", Path("D:/InteractionLab/study-v1")),
+                                         getattr(args, "direction_root", Path("D:/InteractionLab/direction-study-v1")))
         token = secrets.token_urlsafe(32)
-        bridge = DesktopBridge(state_dir, data_root, settings, token, imports)
+        bridge = DesktopBridge(state_dir, data_root, settings, token, imports, analyses)
         import webview
         webview.settings["ALLOW_DOWNLOADS"] = False
         webview.settings["ALLOW_FILE_URLS"] = False
@@ -329,11 +347,11 @@ def run(args):
                     from adp.api import create_app
                     import torch
                     torch.set_num_threads(2)
-                    return create_app(**paths, import_manager=imports, desktop_token=token, native_dialogs=bridge, state_dir=state_dir, data_root=data_root)
+                    return create_app(**paths, import_manager=imports, desktop_token=token, native_dialogs=bridge, state_dir=state_dir, data_root=data_root, analysis_store=analyses, training_status=training_status)
 
                 origin = backend.start(make_app)
                 if origin and not backend.closed.is_set():
-                    window.load_url(origin)
+                    window.load_url(origin + ("/#training" if getattr(args, "training", False) else ""))
             except Exception as error:
                 logging.exception("Application startup failed")
                 still_open = not backend.closed.is_set()
