@@ -36,14 +36,14 @@ def queue_protocol_hash(host):
                  for configuration in CONFIGURATIONS for seed in SEEDS]})
 
 
-def _verify(directory, loaded, specification, payload, index):
+def _verify(directory, loaded, specification, payload, index, *, protocol_hash=None):
     metadata = loaded["manifest"]
     provenance = metadata["provenance"]
     identifier = spec_hash(specification)
     device_count = 2 if specification["host"] == "kaggle" else 1
     if (provenance.get("queue_job_spec") != specification or provenance.get("queue_job_id") != identifier
             or provenance.get("payload_sha256") != PAYLOAD_SHA256 or metadata.get("run_id") != identifier
-            or provenance.get("queue_protocol_sha256") != queue_protocol_hash(specification["host"])
+            or provenance.get("queue_protocol_sha256") != (protocol_hash or queue_protocol_hash(specification["host"]))
             or type(provenance.get("allocated_device_count")) is not int
             or provenance["allocated_device_count"] != device_count):
         raise ValueError("Queue result differs from its approved immutable job specification")
@@ -100,7 +100,20 @@ def _verify(directory, loaded, specification, payload, index):
 
 def import_queue_result(archive, output_root, *, payload_archive, job_spec, expected_archive_sha256):
     """Preserve ZIP/source data; durable verified receipt precedes remote acknowledgement."""
-    specification = validate_spec(job_spec)
+    return _import_result(archive, output_root, payload_archive=payload_archive,
+        specification=validate_spec(job_spec), expected_archive_sha256=expected_archive_sha256,
+        protocol_hash=queue_protocol_hash(job_spec["host"]))
+
+
+def import_distributed_result(archive, output_root, *, payload_archive, job_spec, expected_archive_sha256):
+    from adp.distributed_plan import validate_spec as validate_distributed, protocol_hash
+    specification = validate_distributed(job_spec)
+    return _import_result(archive, output_root, payload_archive=payload_archive,
+        specification=specification, expected_archive_sha256=expected_archive_sha256,
+        protocol_hash=protocol_hash(specification["host"]))
+
+
+def _import_result(archive, output_root, *, payload_archive, specification, expected_archive_sha256, protocol_hash):
     archive, root = _safe(archive), _safe(output_root)
     digest = _identifier(expected_archive_sha256)
     if not archive.is_file() or archive.stat().st_size > MAX_TOTAL_BYTES + MAX_JSON_BYTES:
@@ -129,7 +142,7 @@ def import_queue_result(archive, output_root, *, payload_archive, job_spec, expe
             for entry in entries:
                 _write_new(stage / entry.filename, zipped.read(entry))
             loaded = validate_snapshot(stage)
-            _verify(stage, loaded, specification, payload, index)
+            _verify(stage, loaded, specification, payload, index, protocol_hash=protocol_hash)
             with archive.open("rb") as stream:
                 if hashlib.file_digest(stream, "sha256").hexdigest() != digest:
                     raise ValueError("Queue ZIP changed during verification")
@@ -137,7 +150,7 @@ def import_queue_result(archive, output_root, *, payload_archive, job_spec, expe
             receipt = {"version": 1, "verified": True, "job_id": spec_hash(specification),
                 "job_spec": specification, "snapshot_id": installed["snapshot_id"],
                 "archive_sha256": digest, "payload_sha256": PAYLOAD_SHA256,
-                "queue_protocol_sha256": queue_protocol_hash(specification["host"]),
+                "queue_protocol_sha256": protocol_hash,
                 "allocated_device_count": loaded["manifest"]["provenance"]["allocated_device_count"],
                 "manifest_sha256": loaded["manifest_sha256"], "files": loaded["manifest"]["files"],
                 "checkpoint_validation": "strict_cpu_observed_only_completed",

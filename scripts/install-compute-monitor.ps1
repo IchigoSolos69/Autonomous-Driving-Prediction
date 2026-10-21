@@ -42,16 +42,17 @@ foreach ($path in @($startup, $desktop)) {
     }
 }
 foreach ($path in @($startup, $desktop)) {
+    $shortcutArguments = if ($path -eq $desktop) { $arguments + ' --show-status' } else { $arguments }
     $link = $shell.CreateShortcut($path)
     $link.TargetPath = $pythonPath
-    $link.Arguments = $arguments
+    $link.Arguments = $shortcutArguments
     $link.WorkingDirectory = $project
     $link.Description = 'Independent Interaction Lab compute checks, transfers and guarded cleanup every five minutes'
     $link.Save()
     $saved = $shell.CreateShortcut($path)
-    if ($saved.TargetPath -ne $pythonPath -or $saved.Arguments -ne $arguments) {
+    if ($saved.TargetPath -ne $pythonPath -or $saved.Arguments -ne $shortcutArguments) {
         throw ('Shortcut verification failed: ' + $path)
     }
     Write-Output ('Created: ' + $path)
 }
-Write-Output 'Launch the desktop shortcut to start now. It also starts when this Windows user signs in.'
+Write-Output 'The desktop shortcut starts the monitor and shows its status. Sign-in startup stays quiet.'

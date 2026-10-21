@@ -119,7 +119,7 @@ def _host(value, now):
         "source_observed_at": source_observed_at, "published_at": published_at,
         **{name:_number(connection.get(name), integer=True) for name in
             ("completed_jobs", "completed_epochs", "available_archives", "expected_archives")}}
-    return _freshness(row, now)
+    return _freshness(row, now, threshold=600 if row['phase'] == 'distributed development v2' else STALE_AFTER_SECONDS)
 
 
 def _local(studies, now, published=None):

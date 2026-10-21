@@ -41,9 +41,52 @@ def launch(state_dir):
     return {"state": "started", "pid": process.pid}
 
 
+def status_message(result, state_dir):
+    from adp.compute_monitor import monitor_status
+
+    try:
+        state = monitor_status(state_dir)
+    except (OSError, ValueError, RuntimeError):
+        state = None
+    if state is None:
+        lines = ["The launch request succeeded, but monitor status could not be read.",
+                 "Check the saved status and log below."]
+    elif (state.get("running") and not state.get("pid_stale")
+          and state.get("pid_alive") is not False and state.get("state") != "stopped"):
+        lines = ["The compute monitor is running in the background.",
+                 f"Worker PID: {state.get('pid') or 'not yet published'}",
+                 f"Phase: {state.get('phase') or 'starting'}",
+                 f"Completed checks: {state.get('cycles_completed', 0)}",
+                 f"Last {'completed check' if state.get('phase') == 'waiting' else 'check update'}: {state.get('updated_at') or 'not yet published'}",
+                 f"Next check: {state.get('next_check_at') or 'scheduled after the current check finishes'}"]
+    elif result.get("state") == "started" or state.get("running"):
+        # The detached worker may not have acquired its lock or written status yet.
+        lines = ["The compute monitor is starting in the background.",
+                 f"Startup process PID: {result.get('pid') if result.get('state') == 'started' else 'not yet confirmed'}",
+                 "The first check and worker status have not been published yet."]
+    else:
+        lines = ["The compute monitor is not currently running.",
+                 "It may have stopped after the shortcut checked it. Launch the shortcut again."]
+    lines += ["", f"Status: {Path(state_dir) / 'status.json'}",
+              f"Log: {Path(state_dir) / 'monitor.log'}", "",
+              "Closing this dialog does not stop the background monitor.",
+              "Open Interaction Lab's Training screen for training and cloud evidence."]
+    return "\n".join(lines)
+
+
+def show_status(result, state_dir):
+    message = status_message(result, state_dir)
+    if os.name == "nt":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, "Interaction Lab Compute Monitor", 0x40)
+    elif sys.stdout is not None:
+        print(message)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", type=Path, default=Path("D:/InteractionLab/remote-compute/monitor"))
+    parser.add_argument("--show-status", action="store_true", help="Show background status after launch; omit for quiet sign-in startup")
     args = parser.parse_args(argv)
     try:
         result = launch(args.state_dir)
@@ -55,7 +98,9 @@ def main(argv=None):
         elif sys.stderr is not None:
             print(message, file=sys.stderr)
         return 1
-    if sys.stdout is not None:
+    if args.show_status:
+        show_status(result, args.state_dir)
+    elif sys.stdout is not None:
         print(json.dumps(result))
     return 0
 

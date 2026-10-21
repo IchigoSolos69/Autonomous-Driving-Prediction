@@ -174,9 +174,16 @@ def run_cycle(config_path, hosts_path, *, phase=lambda _: None, logger=None, pos
         message = _brief(_diagnostic(error))
         outcomes["private_error"] = message
         try:
-            _publish_host(hosts_path, "private", {"status": "unavailable", "phase": "sync_unavailable",
-                "message": _brief("Private synchronization could not be verified. " + message + " Previous local results and cleanup records are retained."),
-                "observed_at": _now()})
+            current = _read(hosts_path)[0] if Path(hosts_path).exists() else {}
+            previous = next((row for row in current.get('hosts',[]) if row.get('id')=='private'),{})
+            if previous.get('phase') == 'distributed development v2':
+                _publish_host(hosts_path,'private',{'connection':{'status':'unavailable','phase':'ssh_unavailable',
+                    'scope':'connection_capability','checked_at':_now(),
+                    'message':'SSH synchronization was unavailable. The last training observation and its original age are retained.'}})
+            else:
+                _publish_host(hosts_path, "private", {"status": "unavailable", "phase": "sync_unavailable",
+                    "message": _brief("Private synchronization could not be verified. " + message + " Previous local results and cleanup records are retained."),
+                    "observed_at": _now()})
         except Exception as publish_error:
             outcomes["private_publish_error"] = _brief(_diagnostic(publish_error))
     phase("local_cleanup")
@@ -331,8 +338,21 @@ def main(argv=None):
         else:
             postcheck = None
             if args.queue_plan:
-                from adp.private_queue import cycle
-                postcheck = lambda: cycle(args.config, args.queue_plan)
+                from adp.private_queue import cycle, _plan, local_dispatch
+                def postcheck():
+                    from adp.distributed_control import ROOT, cycle as distributed_cycle
+                    if (ROOT / 'approved.json').is_file():
+                        # The completed retired queue is preserved; only its pending
+                        # local dependency check continues beside the new allocation.
+                        try:
+                            local = local_dispatch(_plan(args.queue_plan))
+                        except (OSError,ValueError,RuntimeError) as error:
+                            local = {'state':'waiting','message':_brief(error)}
+                        distributed = distributed_cycle()
+                        return {'state':distributed['private']['state'],
+                            'message':local['message'] + ' Distributed allocation: ' +
+                                ', '.join(host + '=' + item['state'] for host,item in distributed.items())}
+                    return cycle(args.config, args.queue_plan)
             result = run_monitor(args.config, args.state_dir, args.hosts,
                                  interval_seconds=args.interval_seconds, once=args.once, postcheck=postcheck)
         if sys.stdout is not None:

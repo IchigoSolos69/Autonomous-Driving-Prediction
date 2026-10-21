@@ -35,7 +35,7 @@ def _delivery(sync, result_root, previous):
         raise ValueError("Malformed sync snapshot evidence")
     archived = snapshot.get("state") == "no_checkpoint"
     identifier = snapshot.get("snapshot_id")
-    if archived and previous.get("phase") == "development queue":
+    if archived and previous.get("phase") in {"development queue", "distributed development v2"}:
         matches = []
         for count, path in enumerate((result_root / "receipts").glob("*.json"), 1):
             if count > 64 or not re.fullmatch(r"[0-9a-f]{64}", path.stem):
@@ -148,7 +148,7 @@ def update_hosts(last_sync, hosts_path, *, gpu="NVIDIA GeForce 940MX (4 GiB)", n
         raise ValueError("Existing host identities are invalid; the file was preserved")
     previous = next((row for row in rows if row["id"] == "private"), {})
     value = _private(sync, last_sync.resolve().parent, previous, gpu, time.time() if now is None else now)
-    if previous.get("phase") == "development queue":
+    if previous.get("phase") in {"development queue", "distributed development v2"}:
         _host(previous, time.time() if now is None else now)
         return previous
     document["hosts"] = [value if row["id"] == "private" else row for row in rows]

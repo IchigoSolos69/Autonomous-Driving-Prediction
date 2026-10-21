@@ -10,6 +10,8 @@ Observed **20 October 2026, 07:11 UTC**: actual monitor PID **33896** held the e
 
 The Desktop and Windows Startup shortcuts use `D:\InteractionLab\runtime-cu130\Scripts\pythonw.exe` and `scripts/start-compute-monitor.py`. The launcher detaches the monitor from its caller and reuses an existing monitor owner. Startup runs at user sign-in; this is a per-user process, not a Windows service.
 
+The Desktop shortcut **Interaction Lab Compute Monitor** adds `--show-status`: double-click it to start or reuse the background worker and open a native status dialog with its PID, latest check, next check, and status/log file locations. Closing that dialog leaves the monitor running. A fresh start may briefly report that its first status has not been published. The Windows Startup shortcut omits the flag and stays quiet at sign-in. These shortcut arguments are applied by `scripts/install-compute-monitor.ps1`; source changes alone do not update an already installed shortcut.
+
 Run console commands from the managed workspace:
 
 ```powershell
@@ -19,6 +21,7 @@ Set-Location -LiteralPath $ProjectRoot
 $env:PYTHONPATH = Join-Path $ProjectRoot 'src'
 
 & $ResearchPython scripts/start-compute-monitor.py
+& $ResearchPython scripts/start-compute-monitor.py --show-status
 & $ResearchPython scripts/compute-monitor.py --status
 & $ResearchPython scripts/compute-monitor.py --stop
 ```
@@ -69,7 +72,7 @@ Completed private exports pass archive/member hashes, approved source/payload/co
 
 Colab and Kaggle queues are explicitly started inside normal notebook runtimes and advance through their finite jobs while the runtime remains available. Allocation and session persistence remain variable. The independent Windows monitor handles local/private operations; it cannot reconnect a free cloud runtime, guarantee unattended cloud transfers, or bypass interactive deletion confirmation. The local monitor does not allocate a Colab GPU or turn its runtime into an SSH/distributed worker; see the [Colab FAQ](https://research.google.com/colaboratory/faq.html).
 
-Each cycle also checks cloud connection capability. No local Kaggle credential or Google Drive desktop sync was found in the presence-only qualification check. Browser sign-in does not authenticate a separate background program. Until a supported connection exists, `hosts.json` records a separate `connection_required` message and check time while retaining the last actual training status, observation time, progress and verified receipts. A connection check never makes old training evidence fresh.
+Each cycle also checks cloud connection capability. Drive sync and the official read-only Kaggle connection are now installed. The distributed-v2 controller reads Colab allocation evidence through Drive and attempts Kaggle saved-output downloads. Kaggle currently denies status/output access with HTTP 403 despite valid sign-in. `hosts.json` records connection results separately while retaining the last actual training observation, progress and verified receipts. A successful connection check never makes old training evidence fresh. See [the active distributed-v2 workflow](DISTRIBUTED_COMPUTE_V2.md) for current allocations; the v1 queue details above are historical.
 
 The read-only Kaggle adapter invokes only the official [`kaggle kernels status`](https://github.com/Kaggle/kaggle-cli/blob/main/docs/kernels.md#kaggle-kernels-status) command when a local official CLI and credential are available. This reports the latest saved run; it does not establish the state of an unsaved interactive editor session, GPU use or per-epoch progress. The adapter performs no upload, allocation, execution, output download or deletion. Credentials remain inside the CLI and are never written to application status/logs. Free Colab has no supported live-runtime adapter in this deployment; notebook inspection remains interactive. The optional [saved Drive evidence workflow](CLOUD_SAVED_EVIDENCE.md) supplies checksummed status and immutable completed exports through a locally synced folder. It remains explicitly saved and possibly stale notebook evidence, separate from live runtime status.
 

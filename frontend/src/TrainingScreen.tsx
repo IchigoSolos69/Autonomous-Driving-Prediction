@@ -19,7 +19,7 @@ function ComputeHosts({ hosts }: { hosts?: ComputeHostStatus[] }) {
     const stale = host?.freshness?.stale ?? host?.stale ?? false;
     const verified = host?.transfer?.verified_at ? Date.parse(host.transfer.verified_at) : NaN;
     const training = host?.training;
-    const connection = host?.connection;
+    const connection = id === 'colab' || id === 'kaggle' || (host?.connection && host.connection.status !== 'unconfigured') ? host?.connection : null;
     return <tr key={id} data-host-id={id} className={stale ? 'training-compute-stale' : ''}>
       <th scope="row"><strong>{host?.label || fallbackLabel}</strong><span>{host?.gpu || 'GPU not reported'}</span></th>
       <td><strong>{host?.status ? readable(host.status) : 'No status yet'}</strong><small>{host?.phase ? `Phase: ${readable(host.phase)}` : host ? 'Phase not reported' : 'Not configured'}</small><small className={stale ? 'training-stale' : ''}>{seconds == null ? `${stale ? 'Stale report · ' : ''}No update time reported` : `${stale ? 'Stale report · last checked ' : 'Last checked '}${age(seconds)}`}</small>{stale && host?.last_observed_status && host.last_observed_status !== host.status && <small>Last observed: {readable(host.last_observed_status)}</small>}{host?.message && <p>{host.message}</p>}{connection && <><small>Monitor connection: {readable(connection.status)}{connection.checked_at && <> · checked <time dateTime={connection.checked_at}>{new Date(connection.checked_at).toLocaleTimeString()}</time></>}</small>{connection.message && <p>{connection.message}</p>}</>}</td>

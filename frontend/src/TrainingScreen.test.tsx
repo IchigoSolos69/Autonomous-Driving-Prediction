@@ -197,13 +197,24 @@ describe('read-only training monitor', () => {
     const host = { ...computeHosts.find((item) => item.id === 'colab')!, status: 'completed',
       freshness: { age_seconds: 7200, stale: true },
       connection: { status: 'unconfigured', checked_at: '2026-10-20T11:55:00Z', message: 'Connect the approved results folder to enable unattended checks.' } };
-    vi.stubGlobal('fetch', vi.fn(async () => response({ ...snapshot, compute_hosts: [host] })));
+    const local = { ...computeHosts.find((item) => item.id === 'local')!, connection: { status: 'unconfigured' } };
+    vi.stubGlobal('fetch', vi.fn(async () => response({ ...snapshot, compute_hosts: [host, local] })));
     await act(async () => root.render(<TrainingScreen />));
     const row = container.querySelector('[data-host-id="colab"]');
     expect(row?.textContent).toContain('Stale report · last checked 2.0 h ago');
     expect(row?.textContent).toContain('Monitor connection: Unconfigured');
     expect(row?.textContent).toContain('Connect the approved results folder');
     expect(row?.querySelector('time[datetime="2026-10-20T11:55:00Z"]')).not.toBeNull();
+    expect(container.querySelector('[data-host-id="local"]')?.textContent).not.toContain('Monitor connection');
+  });
+
+  it('shows an actual SSH check separately from private training progress', async () => {
+    const host = { ...computeHosts.find((item) => item.id === 'private')!, connection: {
+      status: 'unavailable', checked_at: '2026-10-20T11:55:00Z', message: 'SSH check failed; saved progress retained.' } };
+    vi.stubGlobal('fetch', vi.fn(async () => response({ ...snapshot, compute_hosts: [host] })));
+    await act(async () => root.render(<TrainingScreen />));
+    expect(container.querySelector('[data-host-id="private"]')?.textContent).toContain('Monitor connection: Unavailable');
+    expect(container.querySelector('[data-host-id="private"]')?.textContent).toContain('saved progress retained');
   });
 
   const appResponse = (url: string) => {
