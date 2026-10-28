@@ -34,6 +34,16 @@ jobs:
           Add-Content audit-requirements.txt 'torch==2.13.0'
           $env:PYTHONPATH = '.audit-tools'
           python -m pip_audit -r audit-requirements.txt --no-deps --disable-pip --progress-spinner off -f json -o artifacts/dependency-audit.json
+          $AuditExitCode = $LASTEXITCODE
+          if (Test-Path artifacts/dependency-audit.json) {
+            $AuditReport = Get-Content artifacts/dependency-audit.json -Raw | ConvertFrom-Json
+            foreach ($Package in $AuditReport.dependencies) {
+              foreach ($Vulnerability in $Package.vulns) {
+                Write-Output ('{0}=={1}: {2}; fixed in: {3}' -f $Package.name, $Package.version, $Vulnerability.id, ($Vulnerability.fix_versions -join ', '))
+              }
+            }
+          }
+          exit $AuditExitCode
       - name: Frontend tests and production build
         working-directory: frontend
         run: |
